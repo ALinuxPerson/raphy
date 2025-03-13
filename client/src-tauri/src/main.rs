@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use native_dialog::MessageType;
 
 fn main() -> ExitCode {
-    if let Err(error) = raphy_client_lib::run() {
+    if let Err(error) = raphy_client_app_lib::run() {
         
         ExitCode::FAILURE
     } else {
