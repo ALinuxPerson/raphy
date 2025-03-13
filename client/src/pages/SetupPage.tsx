@@ -1,32 +1,78 @@
 import { useState, useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { connectToServer, Server } from "../utils/server";
 import ServerList from "../components/setup/ServerList.tsx";
 import ConnectionStatus from "../components/setup/ConnectionStatus.tsx";
 import NavigationButtons from "../components/setup/NavigationButtons.tsx";
 
 const SetupPage = () => {
-    const [servers, setServers] = useState([
-        { id: '1', hostname: 'Server 1', ip: '192.168.1.1' },
-        { id: '2', hostname: 'Server 2', ip: '192.168.1.2' },
-    ])
-    const [selectedServer, setSelectedServer] = useState(null)
-    const [connectionStatus, setConnectionStatus] = useState("idle")
+    const [servers, setServers] = useState<Record<string, Server>>({});
+    const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+    const [connectionStatus, setConnectionStatus] = useState("idle");
+
+    useEffect(() => {
+        // Listen for server updates from the Tauri backend
+        const unlisten = listen<Record<string, Server>>("servers-updated", (event) => {
+            const serversMap = event.payload;
+
+            // Enhance server objects with display properties
+            const enhancedServersMap: Record<string, Server> = {};
+
+            Object.entries(serversMap).forEach(([fullName, server]) => {
+                enhancedServersMap[fullName] = {
+                    ...server,
+                    id: fullName,
+                    hostname: fullName.split('.')[0], // Extract hostname from fullname
+                    ip: Array.from(server.addresses)[0] || 'Unknown'
+                };
+            });
+
+            setServers(enhancedServersMap);
+
+            // If the previously selected server is no longer in the list, deselect it
+            if (selectedServerId && !enhancedServersMap[selectedServerId]) {
+                setSelectedServerId(null);
+            }
+        });
+
+        return () => {
+            unlisten.then(unlistenFn => unlistenFn());
+        };
+    }, [selectedServerId]);
 
     const handleConnect = async () => {
-        if (!selectedServer) return;
+        if (!selectedServerId || !servers[selectedServerId]) return;
 
         setConnectionStatus('connecting');
 
         try {
-            // Use Tauri API to connect to the server
-            // await window.__TAURI__.invoke('connect_to_server', { server: selectedServer })
+            const connected = await connectToServer(selectedServerId);
 
-            setConnectionStatus('connected');
-            // Save server to configuration
+            if (connected) {
+                setConnectionStatus('connected');
+            } else {
+                setConnectionStatus('failed');
+            }
         } catch (error) {
             setConnectionStatus('failed');
             console.error(error);
         }
     };
+
+    const handleRefresh = () => {
+        // The server discovery is handled automatically by the backend
+        // This is just a visual cue for the user that something is happening
+        setConnectionStatus('searching');
+        setTimeout(() => {
+            if (connectionStatus === 'searching') {
+                setConnectionStatus('idle');
+            }
+        }, 2000);
+    };
+
+    // Convert servers object to array for the ServerList component
+    const serversArray = Object.values(servers);
+    const selectedServer = selectedServerId ? servers[selectedServerId] : null;
 
     return (
         <div className="flex flex-col h-screen bg-white dark:bg-gray-900 text-black dark:text-white">
@@ -39,9 +85,10 @@ const SetupPage = () => {
 
             {/* Server List */}
             <ServerList
-                servers={servers}
+                servers={serversArray}
                 selectedServer={selectedServer}
-                onSelectServer={setSelectedServer}
+                onSelectServer={(server) => setSelectedServerId(server.id)}
+                onRefresh={handleRefresh}
                 disabled={connectionStatus === 'connecting' || connectionStatus === 'connected'}
             />
 

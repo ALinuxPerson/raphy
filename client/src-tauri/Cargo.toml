@@ -26,4 +26,5 @@ raphy-protocol = { version = "0.1.0", path = "../../protocol" }
 mdns-sd = "0.13.3"
 anyhow = "1.0.97"
 native-dialog = "0.7.0"
+indexmap = { version = "2.8.0", features = ["serde"] }
 
