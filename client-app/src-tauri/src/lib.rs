@@ -2,13 +2,13 @@ mod commands;
 
 use crate::commands::Server;
 use anyhow::Context;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use mdns_sd::ServiceEvent;
 use native_dialog::MessageType;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use tauri::{App, Emitter, Manager, Wry};
+use tokio::sync::Mutex;
 
 fn real_setup(app: &mut App<Wry>) -> anyhow::Result<()> {
     let service_daemon =
@@ -18,16 +18,17 @@ fn real_setup(app: &mut App<Wry>) -> anyhow::Result<()> {
         .context("Failed to browse for the raphy servers.")?;
     let servers = Arc::new(Mutex::new(IndexMap::new()));
 
+    let runtime = tokio::runtime::Runtime::new().context("Failed to build the Tokio runtime.")?;
     let app_handle = app.handle().clone();
-    thread::spawn({
+    runtime.spawn({
         let servers = Arc::clone(&servers);
 
-        move || {
+        async move {
             for event in receiver {
                 let services_updated = match event {
                     ServiceEvent::ServiceResolved(info) => {
                         println!("server resolved: {info:#?}");
-                        servers.lock().unwrap().insert(
+                        servers.lock().await.insert(
                             info.get_fullname().to_owned(),
                             Server {
                                 addresses: info.get_addresses().clone().into_iter().collect(),
@@ -46,7 +47,7 @@ fn real_setup(app: &mut App<Wry>) -> anyhow::Result<()> {
 
                 if services_updated {
                     app_handle
-                        .emit("servers-updated", servers.lock().unwrap().clone())
+                        .emit("servers-updated", servers.lock().await.clone())
                         .unwrap();
                 }
             }
@@ -57,6 +58,7 @@ fn real_setup(app: &mut App<Wry>) -> anyhow::Result<()> {
         service_daemon,
         servers,
         client: Mutex::new(None),
+        runtime,
     });
 
     Ok(())
