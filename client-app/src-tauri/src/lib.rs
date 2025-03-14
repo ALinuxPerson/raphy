@@ -55,7 +55,8 @@ fn real_setup(app: &mut App<Wry>) -> anyhow::Result<()> {
 
     app.manage(commands::AppState {
         service_daemon,
-        services: servers,
+        servers,
+        client: Mutex::new(None),
     });
 
     Ok(())

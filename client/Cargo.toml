@@ -1,8 +1,13 @@
 [package]
-name = "client"
+name = "raphy-client"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.97"
+bincode = "2.0.1"
 raphy-protocol = { version = "0.1.0", path = "../protocol" }
-tokio = { version = "1.44.1", features = ["net"] }
+thiserror = "2.0.12"
+tokio = { version = "1.44.1", features = ["io-util", "net", "sync"] }
+tokio-graceful-shutdown = "0.16.0"
+tracing = "0.1.41"

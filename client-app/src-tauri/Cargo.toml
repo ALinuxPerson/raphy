@@ -27,4 +27,6 @@ mdns-sd = "0.13.3"
 anyhow = "1.0.97"
 native-dialog = "0.7.0"
 indexmap = { version = "2.8.0", features = ["serde"] }
+raphy-client = { version = "0.1.0", path = "../../client" }
+anyhow-tauri = "1.0.0"
 

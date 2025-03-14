@@ -1,9 +1,10 @@
 use crate::base::NetworkToServerMessage;
 use anyhow::Context;
-use raphy_protocol::{Config, Operation};
+use raphy_protocol::{Config, Operation, OperationId, SerdeError, TaskId};
 use slab::Slab;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::{env, fs};
+use std::{env, fmt, fs};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -12,13 +13,22 @@ use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
 const UNIX_SOCKET_PATH: &str = "/tmp/raphy.sock";
 
+#[derive(Copy, Clone)]
+pub struct ClientId(usize);
+
+impl fmt::Display for ClientId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 pub struct ClientToServerMessage {
-    id: usize,
+    id: ClientId,
     data: raphy_protocol::ClientToServerMessage,
 }
 
 pub struct ServerToClientMessage {
-    id: usize,
+    id: ClientId,
     data: raphy_protocol::ServerToClientMessage,
 }
 
@@ -56,7 +66,7 @@ enum NewClient {
 
 async fn read_subsystem(
     c2s_tx: UnboundedSender<ClientToServerMessage>,
-    id: usize,
+    id: ClientId,
     mut read_half: impl AsyncRead + Unpin,
     sh: SubsystemHandle<anyhow::Error>,
     kind: ClientKind,
@@ -138,12 +148,35 @@ async fn write_subsystem(
     Ok(())
 }
 
-struct MessageBroadcaster(Vec<UnboundedSender<raphy_protocol::ServerToClientMessage>>);
+struct MessageBroadcaster {
+    senders: Vec<UnboundedSender<raphy_protocol::ServerToClientMessage>>,
+    active_task: Option<(
+        TaskId,
+        UnboundedSender<raphy_protocol::ServerToClientMessage>,
+    )>,
+}
 
 impl MessageBroadcaster {
-    pub fn broadcast(&self, message: raphy_protocol::ServerToClientMessage) {
-        for tx in &self.0 {
+    pub fn broadcast(self, message: raphy_protocol::ServerToClientMessage) {
+        if let Some((_, tx)) = self.active_task {
             tx.send(message.clone()).unwrap();
+        }
+
+        for tx in self.senders {
+            tx.send(message.clone()).unwrap();
+        }
+    }
+
+    pub fn broadcast_with_task_id(
+        self,
+        mut message_fn: impl FnMut(Option<TaskId>) -> raphy_protocol::ServerToClientMessage,
+    ) {
+        if let Some((task_id, tx)) = self.active_task {
+            tx.send(message_fn(Some(task_id))).unwrap();
+        }
+
+        for tx in &self.senders {
+            tx.send(message_fn(None)).unwrap();
         }
     }
 }
@@ -188,13 +221,25 @@ impl NetworkTask {
         }
     }
 
-    fn message_broadcaster(&self) -> MessageBroadcaster {
-        let txs = self
-            .clients
-            .iter()
-            .map(|(_, client)| client.s2c_tx.clone())
-            .collect();
-        MessageBroadcaster(txs)
+    fn message_broadcaster(&self, active_task: Option<(ClientId, TaskId)>) -> MessageBroadcaster {
+        if let Some((client_id, task_id)) = active_task {
+            let mut senders: HashMap<_, _> = self
+                .clients
+                .iter()
+                .map(|(cid, c)| (cid, c.s2c_tx.clone()))
+                .collect();
+            let active_task = senders.remove(&client_id.0).map(|tx| (task_id, tx));
+
+            MessageBroadcaster {
+                senders: senders.into_iter().map(|(_, tx)| tx).collect(),
+                active_task,
+            }
+        } else {
+            MessageBroadcaster {
+                senders: self.clients.iter().map(|(_, c)| c.s2c_tx.clone()).collect(),
+                active_task: None,
+            }
+        }
     }
 
     pub async fn run(mut self, sh: SubsystemHandle<anyhow::Error>) {
@@ -220,7 +265,7 @@ impl NetworkTask {
         kind: ClientKind,
     ) {
         let (s2c_tx, s2c_rx) = mpsc::unbounded_channel();
-        let id = self.clients.insert(Client { s2c_tx, kind });
+        let id = ClientId(self.clients.insert(Client { s2c_tx, kind }));
         let c2s_tx = self.c2s_tx.clone();
         self.sh().start(SubsystemBuilder::new(
             format!("{}-read-{id}", kind.label()),
@@ -251,23 +296,30 @@ impl NetworkTask {
 }
 
 impl NetworkTask {
-    fn handle_c2s_update_config(&self, config: Config) {
+    fn handle_c2s_update_config(&self, client_id: ClientId, task_id: TaskId, config: Config) {
         let (tx, rx) = oneshot::channel();
         self.n2s_tx
             .send(NetworkToServerMessage::UpdateConfig(config.clone(), tx))
             .unwrap();
 
-        let message_broadcaster = self.message_broadcaster();
+        let message_broadcaster = self.message_broadcaster(Some((client_id, task_id)));
         tokio::spawn(async move {
             rx.await.unwrap();
-            message_broadcaster
-                .broadcast(raphy_protocol::ServerToClientMessage::ConfigUpdated(config))
+            message_broadcaster.broadcast_with_task_id(|tid| {
+                raphy_protocol::ServerToClientMessage::ConfigUpdated(config.clone(), tid)
+            })
         });
     }
 
-    fn handle_c2s_perform_operation(&self, operation: Operation) {
+    fn handle_c2s_perform_operation(
+        &self,
+        client_id: ClientId,
+        task_id: TaskId,
+        operation: Operation,
+    ) {
+        let op_id = OperationId::generate();
         self.broadcast_message(raphy_protocol::ServerToClientMessage::OperationRequested(
-            operation,
+            operation, op_id,
         ));
 
         let (tx, rx) = oneshot::channel();
@@ -275,14 +327,21 @@ impl NetworkTask {
             .send(NetworkToServerMessage::PerformOperation(operation, tx))
             .unwrap();
 
-        let message_broadcaster = self.message_broadcaster();
+        let message_broadcaster = self.message_broadcaster(Some((client_id, task_id)));
         tokio::spawn(async move {
-            let message = match rx.await.unwrap() {
-                Ok(()) => raphy_protocol::ServerToClientMessage::OperationPerformed(operation),
-                Err(error) => todo!(),
-            };
-
-            message_broadcaster.broadcast(message);
+            match rx.await.unwrap() {
+                Ok(()) => message_broadcaster.broadcast_with_task_id(|tid| {
+                    raphy_protocol::ServerToClientMessage::OperationPerformed(operation, op_id, tid)
+                }),
+                Err(error) => message_broadcaster.broadcast_with_task_id(|tid| {
+                    raphy_protocol::ServerToClientMessage::OperationFailed(
+                        operation,
+                        op_id,
+                        SerdeError::new(&*error),
+                        tid,
+                    )
+                }),
+            }
         });
     }
 
@@ -292,8 +351,8 @@ impl NetworkTask {
             .unwrap();
     }
 
-    fn handle_c2s_shutdown(&self, id: usize) {
-        let Some(client) = self.clients.get(id) else {
+    fn handle_c2s_shutdown(&self, id: ClientId) {
+        let Some(client) = self.clients.get(id.0) else {
             tracing::warn!("client {id} tried to shut down the server, but it doesn't exist",);
             return;
         };
@@ -309,11 +368,11 @@ impl NetworkTask {
 
     fn handle_c2s(&self, c2s: ClientToServerMessage) {
         match c2s.data {
-            raphy_protocol::ClientToServerMessage::UpdateConfig(config) => {
-                self.handle_c2s_update_config(config)
+            raphy_protocol::ClientToServerMessage::UpdateConfig(task_id, config) => {
+                self.handle_c2s_update_config(c2s.id, task_id, config)
             }
-            raphy_protocol::ClientToServerMessage::PerformOperation(operation) => {
-                self.handle_c2s_perform_operation(operation)
+            raphy_protocol::ClientToServerMessage::PerformOperation(task_id, operation) => {
+                self.handle_c2s_perform_operation(c2s.id, task_id, operation)
             }
             raphy_protocol::ClientToServerMessage::Input(input) => self.handle_c2s_input(input),
             raphy_protocol::ClientToServerMessage::Shutdown => self.handle_c2s_shutdown(c2s.id),
