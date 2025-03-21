@@ -7,7 +7,11 @@ edition = "2024"
 anyhow = "1.0.97"
 bincode = "2.0.1"
 raphy-protocol = { version = "0.1.0", path = "../protocol" }
+serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.12"
-tokio = { version = "1.44.1", features = ["io-util", "net", "sync"] }
-tokio-graceful-shutdown = "0.16.0"
+tokio = { version = "1.44.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-util = "0.7.14"
 tracing = "0.1.41"
+
+[dev-dependencies]
+tracing-subscriber = "0.3.19"

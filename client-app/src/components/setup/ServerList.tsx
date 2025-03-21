@@ -5,7 +5,6 @@ interface ServerListProps {
     servers: Server[];
     selectedServer: Server | null;
     onSelectServer: (server: Server) => void;
-    onRefresh?: () => void;
     disabled: boolean;
 }
 
@@ -13,7 +12,6 @@ const ServerList: React.FC<ServerListProps> = ({
                                                    servers,
                                                    selectedServer,
                                                    onSelectServer,
-                                                   onRefresh,
                                                    disabled
                                                }) => {
     return (
@@ -50,24 +48,6 @@ const ServerList: React.FC<ServerListProps> = ({
             ) : (
                 <div className="text-center py-10">
                     <p className="text-gray-500 dark:text-gray-400">No servers detected</p>
-                    <button
-                        className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
-                        onClick={onRefresh}
-                    >
-                        Refresh
-                    </button>
-                </div>
-            )}
-
-            {servers.length > 0 && (
-                <div className="text-center mt-4">
-                    <button
-                        className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
-                        onClick={onRefresh}
-                        disabled={disabled}
-                    >
-                        Refresh Server List
-                    </button>
                 </div>
             )}
         </div>

@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use tokio_graceful_shutdown::SubsystemHandle;
 
 pub enum NetworkToServerMessage {
+    GetConfig(oneshot::Sender<Option<Config>>),
     UpdateConfig(Config, oneshot::Sender<()>),
     PerformOperation(Operation, oneshot::Sender<anyhow::Result<()>>),
     Input(Vec<u8>),
@@ -54,6 +55,9 @@ impl ServerTask {
 
     fn handle_n2s(&mut self, message: NetworkToServerMessage) {
         match message {
+            NetworkToServerMessage::GetConfig(ret) => {
+                ret.send(self.config.clone()).ok().unwrap();
+            }
             NetworkToServerMessage::UpdateConfig(config, ret) => {
                 self.config = Some(config.clone());
                 self.s2ch_tx
@@ -61,20 +65,16 @@ impl ServerTask {
                     .unwrap();
                 ret.send(()).unwrap()
             }
-            NetworkToServerMessage::PerformOperation(operation, ret) => {
-                match operation {
-                    Operation::Start => {
-                        self.s2ch_tx.send(ServerToChildMessage::Start(ret)).unwrap()
-                    }
-                    Operation::Stop => {
-                        self.s2ch_tx.send(ServerToChildMessage::Stop(ret)).unwrap();
-                    }
-                    Operation::Restart => self
-                        .s2ch_tx
-                        .send(ServerToChildMessage::Restart(ret))
-                        .unwrap(),
+            NetworkToServerMessage::PerformOperation(operation, ret) => match operation {
+                Operation::Start => self.s2ch_tx.send(ServerToChildMessage::Start(ret)).unwrap(),
+                Operation::Stop => {
+                    self.s2ch_tx.send(ServerToChildMessage::Stop(ret)).unwrap();
                 }
-            }
+                Operation::Restart => self
+                    .s2ch_tx
+                    .send(ServerToChildMessage::Restart(ret))
+                    .unwrap(),
+            },
             NetworkToServerMessage::Input(input) => self
                 .s2ch_tx
                 .send(ServerToChildMessage::Stdin(input))
@@ -82,11 +82,17 @@ impl ServerTask {
             NetworkToServerMessage::Shutdown => self.sh().request_shutdown(),
         }
     }
-    
+
     fn handle_ch2s(&self, message: ChildToServerMessage) {
         match message {
-            ChildToServerMessage::Stdout(out) => self.global_s2c_tx.send(raphy_protocol::ServerToClientMessage::Stdout(out)).unwrap(),
-            ChildToServerMessage::Stderr(err) => self.global_s2c_tx.send(raphy_protocol::ServerToClientMessage::Stderr(err)).unwrap(),
+            ChildToServerMessage::Stdout(out) => self
+                .global_s2c_tx
+                .send(raphy_protocol::ServerToClientMessage::Stdout(out))
+                .unwrap(),
+            ChildToServerMessage::Stderr(err) => self
+                .global_s2c_tx
+                .send(raphy_protocol::ServerToClientMessage::Stderr(err))
+                .unwrap(),
             ChildToServerMessage::UnexpectedExit(exit_status) => todo!(),
         }
     }

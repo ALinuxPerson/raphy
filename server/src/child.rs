@@ -112,11 +112,11 @@ impl ChildTask {
         };
         let java_path = config
             .java_path
-            .get()
+            .resolve()
             .context("Failed to get the Java path.")?;
         let args = config
             .arguments
-            .get()
+            .resolve()
             .context("Failed to get the server arguments.")?;
         let mut command = match config.user.make_command() {
             Some(mut command) => {
@@ -209,10 +209,7 @@ impl ChildTask {
     }
 
     async fn handle_s2c_stop(&mut self) {
-        if let State::Running {
-            std, waiter_rx, ..
-        } = &mut self.state
-        {
+        if let State::Running { std, waiter_rx, .. } = &mut self.state {
             std.initiate_shutdown();
 
             if let Some(waiter_rx) = waiter_rx.take() {
@@ -227,9 +224,7 @@ impl ChildTask {
                         }
                     }
                     Err(error) => {
-                        tracing::error!(
-                            "failed to wait for the server process to exit: {error}"
-                        );
+                        tracing::error!("failed to wait for the server process to exit: {error}");
                         self.c2s_tx
                             .send(ChildToServerMessage::UnexpectedExit(None))
                             .unwrap()

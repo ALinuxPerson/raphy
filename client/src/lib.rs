@@ -1,231 +1,11 @@
-pub mod managed {
-    use anyhow::Context;
-    use raphy_protocol::{Config, Operation, ServerToClientMessage};
-    use std::io;
-    use std::path::Path;
-    use thiserror::Error;
-    use tokio::net::ToSocketAddrs;
-    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-    use tokio::sync::{broadcast, mpsc, oneshot};
-    use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
-
-    pub struct ClientReader(broadcast::Receiver<ServerToClientMessage>);
-
-    impl ClientReader {
-        pub async fn recv(&mut self) -> Option<ServerToClientMessage> {
-            self.0.recv().await.ok()
-        }
-
-        pub async fn expect(
-            &mut self,
-            mut f: impl FnMut(&ServerToClientMessage) -> bool,
-        ) -> Option<ServerToClientMessage> {
-            loop {
-                let message = self.recv().await?;
-
-                if f(&message) {
-                    return Some(message);
-                }
-            }
-        }
-    }
-
-    impl Clone for ClientReader {
-        fn clone(&self) -> Self {
-            Self(self.0.resubscribe())
-        }
-    }
-
-    #[derive(Debug, Error)]
-    #[error("not a local client")]
-    pub struct NotALocalClient;
-
-    enum ClientToServerMessage {
-        UpdateConfig(Config, oneshot::Sender<()>),
-        PerformOperation(Operation, oneshot::Sender<anyhow::Result<()>>),
-        Input(Vec<u8>),
-        Shutdown(oneshot::Sender<Result<(), NotALocalClient>>),
-    }
-
-    #[derive(Clone)]
-    pub struct ClientWriter(UnboundedSender<ClientToServerMessage>);
-
-    impl ClientWriter {
-        pub async fn update_config(&self, config: Config) -> anyhow::Result<()> {
-            let (tx, rx) = oneshot::channel();
-            self.0
-                .send(ClientToServerMessage::UpdateConfig(config, tx))
-                .context("failed to send update config message")?;
-            rx.await.context("failed to update config")
-        }
-
-        pub async fn perform_operation(&self, operation: Operation) -> anyhow::Result<()> {
-            let (tx, rx) = oneshot::channel();
-            self.0
-                .send(ClientToServerMessage::PerformOperation(operation, tx))
-                .context("failed to send perform operation message")?;
-            rx.await
-                .context("tx dropped")?
-                .context("failed to perform operation")
-        }
-
-        pub async fn input(&self, input: Vec<u8>) -> anyhow::Result<()> {
-            self.0
-                .send(ClientToServerMessage::Input(input))
-                .context("failed to send input message")
-        }
-
-        pub async fn shutdown(&self) -> anyhow::Result<()> {
-            let (tx, rx) = oneshot::channel();
-            self.0
-                .send(ClientToServerMessage::Shutdown(tx))
-                .context("failed to send shutdown message")?;
-            rx.await
-                .context("tx dropped")?
-                .context("failed to shutdown")
-        }
-    }
-
-    async fn client_reader_task(
-        mut reader: crate::ClientReader,
-        s2c_tx: broadcast::Sender<ServerToClientMessage>,
-    ) -> anyhow::Result<()> {
-        loop {
-            match reader.recv().await {
-                Ok(value) => {
-                    s2c_tx.send(value).ok();
-                }
-                Err(error) => {
-                    tracing::error!(?error, "failed to receive message from client");
-                }
-            }
-        }
-    }
-
-    async fn client_writer_task_handle_message(
-        message: ClientToServerMessage,
-        writer: &mut crate::ClientWriter,
-        reader: &mut ClientReader,
-    ) -> anyhow::Result<()> {
-        match message {
-            ClientToServerMessage::UpdateConfig(config, rx) => {
-                let task_id = writer
-                    .update_config(config)
-                    .await
-                    .context("failed to send update config message")?;
-                let ServerToClientMessage::ConfigUpdated(..) = reader
-                    .expect(|m| m.task_id() == Some(task_id))
-                    .await
-                    .context("failed to receive config updated message")?
-                else {
-                    anyhow::bail!("got unexpected s2c message, expected ConfigUpdated");
-                };
-                rx.send(()).ok();
-                Ok(())
-            }
-            ClientToServerMessage::PerformOperation(operation, rx) => {
-                let task_id = writer
-                    .perform_operation(operation)
-                    .await
-                    .context("failed to send perform operation message")?;
-                let message = reader
-                    .expect(|m| m.task_id() == Some(task_id))
-                    .await
-                    .context("failed to receive operation performed message")?;
-
-                match message {
-                    ServerToClientMessage::OperationPerformed(..) => {
-                        rx.send(Ok(())).ok();
-                    }
-                    ServerToClientMessage::OperationFailed(_, _, error, _) => {
-                        rx.send(Err(error.into())).ok();
-                    }
-                    _ => {
-                        anyhow::bail!(
-                            "got unexpected s2c message, expected OperationPerformed or OperationFailed"
-                        );
-                    }
-                }
-
-                Ok(())
-            }
-            ClientToServerMessage::Input(input) => writer
-                .input(input)
-                .await
-                .context("failed to send input message"),
-            ClientToServerMessage::Shutdown(tx) => {
-                if !writer.is_unix() {
-                    writer
-                        .shutdown()
-                        .await
-                        .context("failed to send shutdown message")?;
-                    tx.send(Ok(())).ok();
-                } else {
-                    tx.send(Err(NotALocalClient)).ok();
-                }
-
-                Ok(())
-            }
-        }
-    }
-
-    async fn client_writer_task(
-        mut writer: crate::ClientWriter,
-        mut reader: ClientReader,
-        mut c2s_rx: UnboundedReceiver<ClientToServerMessage>,
-    ) -> anyhow::Result<()> {
-        loop {
-            match c2s_rx.recv().await {
-                Some(message) => {
-                    if let Err(error) =
-                        client_writer_task_handle_message(message, &mut writer, &mut reader).await
-                    {
-                        tracing::error!(?error, "failed to send message to server: {error:#}");
-                    }
-                }
-                None => break Ok(()),
-            }
-        }
-    }
-
-    pub async fn manage(
-        reader: crate::ClientReader,
-        writer: crate::ClientWriter,
-    ) -> (ClientReader, ClientWriter) {
-        // note: this check is not enough; what if they are both the same type but come from
-        // different sources?
-        if (reader.is_unix() && writer.is_tcp()) || (reader.is_tcp() && writer.is_unix()) {
-            panic!("mismatched reader and writer");
-        }
-
-        let (s2c_tx, s2c_rx) = broadcast::channel(64);
-        tokio::spawn(client_reader_task(reader, s2c_tx));
-
-        let client_reader = ClientReader(s2c_rx);
-
-        let (c2s_tx, c2s_rx) = mpsc::unbounded_channel();
-        tokio::spawn({
-            let reader = client_reader.clone();
-            client_writer_task(writer, reader, c2s_rx)
-        });
-
-        (client_reader.clone(), ClientWriter(c2s_tx))
-    }
-
-    pub async fn from_tcp(addrs: impl ToSocketAddrs) -> io::Result<(ClientReader, ClientWriter)> {
-        let (reader, writer) = crate::from_tcp(addrs).await?;
-        Ok(manage(reader, writer).await)
-    }
-
-    pub async fn from_unix(addr: impl AsRef<Path>) -> io::Result<(ClientReader, ClientWriter)> {
-        let (reader, writer) = crate::from_unix(addr).await?;
-        Ok(manage(reader, writer).await)
-    }
-}
+pub mod managed;
 
 pub use managed::manage;
+use std::env;
 
+use anyhow::Context as _;
 use raphy_protocol::{ClientToServerMessage, Config, Operation, ServerToClientMessage, TaskId};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -340,6 +120,13 @@ impl ClientWriter {
         self.0.write_all(&buf).await.map_err(Into::into)
     }
 
+    pub async fn get_config(&mut self) -> Result<TaskId, SendMessageError> {
+        let task_id = TaskId::generate();
+        self.send_message(ClientToServerMessage::GetConfig(task_id))
+            .await?;
+        Ok(task_id)
+    }
+
     pub async fn update_config(&mut self, config: Config) -> Result<TaskId, SendMessageError> {
         let task_id = TaskId::generate();
         self.send_message(ClientToServerMessage::UpdateConfig(task_id, config))
@@ -377,7 +164,10 @@ impl ClientWriter {
 }
 
 pub async fn from_tcp(addrs: impl ToSocketAddrs) -> io::Result<(ClientReader, ClientWriter)> {
+    tracing::debug!("tcp stream connect");
     let stream = TcpStream::connect(addrs).await?;
+    tracing::debug!("tcp stream connected");
+
     let (read_half, write_half) = stream.into_split();
 
     Ok((
@@ -387,11 +177,39 @@ pub async fn from_tcp(addrs: impl ToSocketAddrs) -> io::Result<(ClientReader, Cl
 }
 
 pub async fn from_unix(addr: impl AsRef<Path>) -> io::Result<(ClientReader, ClientWriter)> {
+    tracing::debug!("unix stream connect");
     let stream = UnixStream::connect(addr).await?;
+    tracing::debug!("unix stream connected");
+
     let (read_half, write_half) = stream.into_split();
 
     Ok((
         ClientReader(OwnedReadHalf::Unix(read_half)),
         ClientWriter(OwnedWriteHalf::Unix(write_half)),
     ))
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize)]
+pub enum ClientMode {
+    Local,
+    Remote,
+}
+
+impl ClientMode {
+    pub fn get() -> anyhow::Result<Self> {
+        let current_exe =
+            env::current_exe().context("Failed to determine the current executable path.")?;
+        let current_exe = current_exe
+            .file_name()
+            .context("The current executable path has no file name.")?
+            .to_str();
+
+        match current_exe {
+            Some("raphy-local-client-app") => Ok(Self::Local),
+            Some("raphy-remote-client-app") => Ok(Self::Remote),
+            other => anyhow::bail!(
+                "The client mode could not be determined from the current executable path {other:?}."
+            ),
+        }
+    }
 }

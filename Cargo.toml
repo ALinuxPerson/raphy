@@ -1,4 +1,4 @@
 [workspace]
-members = ["server", "client-app/src-tauri", "protocol", "client"]
+members = ["server", "client-app/src-tauri", "protocol", "client", "common"]
 resolver = "2"
 

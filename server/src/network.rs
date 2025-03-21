@@ -1,19 +1,19 @@
 use crate::base::NetworkToServerMessage;
-use anyhow::Context;
-use raphy_protocol::{Config, Operation, OperationId, SerdeError, TaskId};
+use anyhow::{Context, anyhow};
+use raphy_protocol::{Config, Operation, OperationId, SerdeError, TaskId, UNIX_SOCKET_PATH};
 use slab::Slab;
+use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::{env, fmt, fs};
+use std::{env, fmt, fs, io};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
-use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
+use tokio_graceful_shutdown::{NestedSubsystem, SubsystemBuilder, SubsystemHandle};
 
-const UNIX_SOCKET_PATH: &str = "/tmp/raphy.sock";
-
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct ClientId(usize);
 
 impl fmt::Display for ClientId {
@@ -22,6 +22,7 @@ impl fmt::Display for ClientId {
     }
 }
 
+#[derive(Debug)]
 pub struct ClientToServerMessage {
     id: ClientId,
     data: raphy_protocol::ClientToServerMessage,
@@ -57,11 +58,66 @@ impl ClientKind {
 struct Client {
     s2c_tx: UnboundedSender<raphy_protocol::ServerToClientMessage>,
     kind: ClientKind,
+    subsystem: OnceCell<NestedSubsystem<anyhow::Error>>,
 }
 
 enum NewClient {
     Unix(UnixStream),
     Tcp(TcpStream),
+}
+
+impl NewClient {
+    pub fn kind(&self) -> ClientKind {
+        match self {
+            NewClient::Unix(_) => ClientKind::Unix,
+            NewClient::Tcp(_) => ClientKind::Tcp,
+        }
+    }
+}
+
+async fn read_subsystem_once(
+    c2s_tx: &UnboundedSender<ClientToServerMessage>,
+    id: ClientId,
+    read_half: &mut (impl AsyncRead + Unpin),
+    kind: ClientKind,
+    len: &mut Option<usize>,
+) -> ControlFlow<anyhow::Result<()>> {
+    let mut buf = vec![0; len.unwrap_or(4)];
+    match read_half
+        .read_exact(&mut buf)
+        .await
+        
+    {
+        Ok(_) => {
+            if len.is_none() {
+                *len = Some(u32::from_le_bytes(buf.try_into().unwrap()) as usize);
+                return ControlFlow::Continue(());
+            }
+
+            match bincode::decode_from_slice::<raphy_protocol::ClientToServerMessage, _>(
+                &buf,
+                bincode::config::standard(),
+            )
+            .with_context(|| format!("failed to decode message from {}", kind.stream_label()))
+            {
+                Ok((data, _)) => {
+                    if let Err(error) = c2s_tx
+                        .send(ClientToServerMessage { id, data })
+                        .context("failed to send message to network task")
+                    {
+                        return ControlFlow::Break(Err(error));
+                    }
+                }
+                Err(error) => return ControlFlow::Break(Err(error)),
+            }
+
+            *len = None;
+        }
+        Err(error) if matches!(error.kind(), io::ErrorKind::UnexpectedEof) => return ControlFlow::Break(Ok(())),
+        Err(error) => return ControlFlow::Break(Err(error).with_context(|| format!("failed to read from {}", kind.stream_label()))),
+    }
+
+    ControlFlow::Continue(())
 }
 
 async fn read_subsystem(
@@ -70,44 +126,56 @@ async fn read_subsystem(
     mut read_half: impl AsyncRead + Unpin,
     sh: SubsystemHandle<anyhow::Error>,
     kind: ClientKind,
-) -> anyhow::Result<()> {
-    let kind = kind.stream_label();
+    destroy_tx: UnboundedSender<()>,
+) {
     let mut len = None;
 
     loop {
-        let mut buf = vec![0; len.unwrap_or(4)];
         tokio::select! {
-            result = read_half.read_exact(&mut buf) => {
-                match result {
-                    Ok(_) => {
-                        if len.is_none() {
-                            len = Some(u32::from_le_bytes(buf.try_into().unwrap()) as usize);
-                            continue;
-                        }
-
-                        match bincode::decode_from_slice::<raphy_protocol::ClientToServerMessage, _>(&buf, bincode::config::standard()) {
-                            Ok((data, _)) => {
-                                c2s_tx.send(ClientToServerMessage { id, data }).expect("failed to send message to network task");
-                            }
-                            Err(error) => {
-                                tracing::error!("failed to decode message from {kind}: {error}");
-                                break;
-                            }
-                        }
-
-                        len = None;
+            control_flow = read_subsystem_once(&c2s_tx, id, &mut read_half, kind, &mut len) => match control_flow {
+                ControlFlow::Continue(()) => continue,
+                ControlFlow::Break(result) => {
+                    if let Err(error) = result {
+                        tracing::error!(?error, "{error:#}");                       
                     }
-                    Err(error) => {
-                        tracing::error!("failed to read from {kind}: {error}");
-                        break;
-                    }
+                    
+                    destroy_tx.send(()).ok();
+                    break;
                 }
-            }
+            },
             () = sh.on_shutdown_requested() => break,
         }
     }
+}
 
-    Ok(())
+async fn write_subsystem_once(
+    write_half: &mut (impl AsyncWrite + Unpin),
+    s2c_rx: &mut UnboundedReceiver<raphy_protocol::ServerToClientMessage>,
+    kind: ClientKind,
+) -> ControlFlow<anyhow::Result<()>> {
+    let Some(s2c) = s2c_rx.recv().await else {
+        return ControlFlow::Break(Ok(()));
+    };
+
+    let data = match bincode::encode_to_vec(s2c, bincode::config::standard())
+        .with_context(|| format!("failed to encode message for {}", kind.stream_label()))
+    {
+        Ok(data) => data,
+        Err(error) => return ControlFlow::Break(Err(error)),
+    };
+
+    let mut buf = Vec::with_capacity(4 + data.len());
+    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    buf.extend(data);
+
+    match write_half
+        .write_all(&buf)
+        .await
+    {
+        Ok(_) => ControlFlow::Continue(()),
+        Err(error) if matches!(error.kind(), io::ErrorKind::BrokenPipe) => ControlFlow::Break(Ok(())),
+        Err(error) => ControlFlow::Break(Err(error).with_context(|| format!("failed to write to {}", kind.stream_label()))),
+    }
 }
 
 async fn write_subsystem(
@@ -115,37 +183,24 @@ async fn write_subsystem(
     mut s2c_rx: UnboundedReceiver<raphy_protocol::ServerToClientMessage>,
     sh: SubsystemHandle<anyhow::Error>,
     kind: ClientKind,
-) -> anyhow::Result<()> {
-    let kind = kind.stream_label();
-
+    destroy_tx: UnboundedSender<()>,
+) {
     loop {
         tokio::select! {
-            s2c = s2c_rx.recv() => {
-                let Some(s2c) = s2c else { break };
-                let data = match bincode::encode_to_vec(s2c, bincode::config::standard()) {
-                    Ok(data) => data,
-                    Err(error) => {
-                        tracing::error!("failed to encode message for {kind}: {error}");
-                        break;
+            control_flow = write_subsystem_once(&mut write_half, &mut s2c_rx, kind) => match control_flow {
+                ControlFlow::Continue(()) => continue,
+                ControlFlow::Break(value) => {
+                    if let Err(error) = value {
+                        tracing::error!(?error, "{error:#}");
                     }
-                };
-                let mut buf = Vec::with_capacity(4 + data.len());
-                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                buf.extend(data);
 
-                match write_half.write_all(&buf).await {
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::error!("failed to write to {kind}: {error}");
-                        break;
-                    }
-                }
-            }
+                    destroy_tx.send(()).ok();
+                    break;
+                },
+            },
             () = sh.on_shutdown_requested() => break,
         }
     }
-
-    Ok(())
 }
 
 struct MessageBroadcaster {
@@ -188,6 +243,8 @@ struct NetworkTask {
     c2s_rx: UnboundedReceiver<ClientToServerMessage>,
     n2s_tx: UnboundedSender<NetworkToServerMessage>,
     global_s2c_rx: UnboundedReceiver<raphy_protocol::ServerToClientMessage>,
+    destroy_client_tx: UnboundedSender<ClientId>,
+    destroy_client_rx: UnboundedReceiver<ClientId>,
     sh: Option<Arc<SubsystemHandle<anyhow::Error>>>,
 }
 
@@ -198,12 +255,15 @@ impl NetworkTask {
         global_s2c_rx: UnboundedReceiver<raphy_protocol::ServerToClientMessage>,
     ) -> Self {
         let (c2s_tx, c2s_rx) = mpsc::unbounded_channel();
+        let (destroy_client_tx, destroy_client_rx) = mpsc::unbounded_channel();
         Self {
             clients: Slab::new(),
             new_clients_rx,
             c2s_tx,
             c2s_rx,
             n2s_tx,
+            destroy_client_tx,
+            destroy_client_rx,
             global_s2c_rx,
             sh: None,
         }
@@ -231,13 +291,30 @@ impl NetworkTask {
             let active_task = senders.remove(&client_id.0).map(|tx| (task_id, tx));
 
             MessageBroadcaster {
-                senders: senders.into_iter().map(|(_, tx)| tx).collect(),
+                senders: senders.into_values().collect(),
                 active_task,
             }
         } else {
             MessageBroadcaster {
                 senders: self.clients.iter().map(|(_, c)| c.s2c_tx.clone()).collect(),
                 active_task: None,
+            }
+        }
+    }
+
+    fn destroy_client(&mut self, client_id: ClientId) {
+        match self.clients.try_remove(client_id.0) {
+            Some(client) => {
+                client.subsystem.get().unwrap().initiate_shutdown();
+                tracing::info!(
+                    "{} client with client id {client_id} disconnected from the server",
+                    client.kind.label()
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "attempted to remove non-existent client with client id {client_id}"
+                );
             }
         }
     }
@@ -251,6 +328,7 @@ impl NetworkTask {
                 Some(new_client) = self.new_clients_rx.recv() => self.handle_new_client(new_client),
                 Some(c2s) = self.c2s_rx.recv() => self.handle_c2s(c2s),
                 Some(message) = self.global_s2c_rx.recv() => self.broadcast_message(message),
+                Some(client_id) = self.destroy_client_rx.recv() => self.destroy_client(client_id),
                 () = sh.on_shutdown_requested() => break,
             }
         }
@@ -265,16 +343,50 @@ impl NetworkTask {
         kind: ClientKind,
     ) {
         let (s2c_tx, s2c_rx) = mpsc::unbounded_channel();
-        let id = ClientId(self.clients.insert(Client { s2c_tx, kind }));
+        let id = ClientId(self.clients.insert(Client {
+            s2c_tx,
+            kind,
+            subsystem: OnceCell::new(),
+        }));
         let c2s_tx = self.c2s_tx.clone();
-        self.sh().start(SubsystemBuilder::new(
-            format!("{}-read-{id}", kind.label()),
-            move |sh| async move { read_subsystem(c2s_tx, id, read_half, sh, kind).await },
+        let destroy_client_tx = self.destroy_client_tx.clone();
+        let subsystem = self.sh().start(SubsystemBuilder::new(
+            format!("{}-{id}", kind.label()),
+            async move |sh| {
+                let (destroy_tx, mut destroy_rx) = mpsc::unbounded_channel();
+                sh.start(SubsystemBuilder::new("read", {
+                    let destroy_tx = destroy_tx.clone();
+                    move |sh| async move {
+                        read_subsystem(c2s_tx, id, read_half, sh, kind, destroy_tx).await;
+                        Ok::<_, anyhow::Error>(())
+                    }
+                }));
+                sh.start(SubsystemBuilder::new("write", move |sh| async move {
+                    write_subsystem(write_half, s2c_rx, sh, kind, destroy_tx).await;
+                    Ok::<_, anyhow::Error>(())
+                }));
+                sh.start(SubsystemBuilder::new(
+                    "destroy-helper",
+                    move |sh| async move {
+                        tokio::select! {
+                            () = sh.on_shutdown_requested() => {}
+                            _ = destroy_rx.recv() => {}
+                        }
+
+                        destroy_client_tx.send(id).ok();
+                        Ok::<_, anyhow::Error>(())
+                    },
+                ));
+
+                Ok::<_, anyhow::Error>(())
+            },
         ));
-        self.sh().start(SubsystemBuilder::new(
-            format!("unix-write-{id}"),
-            move |sh| async move { write_subsystem(write_half, s2c_rx, sh, kind).await },
-        ));
+        self.clients
+            .get(id.0)
+            .unwrap()
+            .subsystem
+            .set(subsystem)
+            .ok();
     }
 
     fn handle_new_unix_stream(&mut self, client: UnixStream) {
@@ -288,14 +400,40 @@ impl NetworkTask {
     }
 
     fn handle_new_client(&mut self, new_client: NewClient) {
+        let kind = new_client.kind().label();
+
         match new_client {
             NewClient::Unix(stream) => self.handle_new_unix_stream(stream),
             NewClient::Tcp(stream) => self.handle_new_tcp_stream(stream),
         }
+
+        tracing::info!("new {kind} client connected to the server");
     }
 }
 
 impl NetworkTask {
+    fn handle_c2s_get_config(&self, client_id: ClientId, task_id: TaskId) {
+        let Some(s2c_tx) = self.clients.get(client_id.0).map(|c| c.s2c_tx.clone()) else {
+            tracing::warn!("client {client_id} tried to get the config, but it doesn't exist",);
+            return;
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.n2s_tx
+            .send(NetworkToServerMessage::GetConfig(tx))
+            .unwrap();
+
+        tokio::spawn(async move {
+            let config = rx.await.unwrap();
+            s2c_tx
+                .send(raphy_protocol::ServerToClientMessage::CurrentConfig(
+                    config, task_id,
+                ))
+                .unwrap();
+            tracing::info!(?client_id, ?task_id, "finished responding to message");
+        });
+    }
+
     fn handle_c2s_update_config(&self, client_id: ClientId, task_id: TaskId, config: Config) {
         let (tx, rx) = oneshot::channel();
         self.n2s_tx
@@ -307,7 +445,8 @@ impl NetworkTask {
             rx.await.unwrap();
             message_broadcaster.broadcast_with_task_id(|tid| {
                 raphy_protocol::ServerToClientMessage::ConfigUpdated(config.clone(), tid)
-            })
+            });
+            tracing::info!(?client_id, ?task_id, "finished responding to message");
         });
     }
 
@@ -342,6 +481,7 @@ impl NetworkTask {
                     )
                 }),
             }
+            tracing::info!(?client_id, ?task_id, "finished responding to message");
         });
     }
 
@@ -349,6 +489,7 @@ impl NetworkTask {
         self.n2s_tx
             .send(NetworkToServerMessage::Input(input))
             .unwrap();
+        tracing::info!("finished responding to input message");
     }
 
     fn handle_c2s_shutdown(&self, id: ClientId) {
@@ -367,7 +508,12 @@ impl NetworkTask {
     }
 
     fn handle_c2s(&self, c2s: ClientToServerMessage) {
+        tracing::info!(?c2s, "received new message from a client");
+
         match c2s.data {
+            raphy_protocol::ClientToServerMessage::GetConfig(task_id) => {
+                self.handle_c2s_get_config(c2s.id, task_id)
+            }
             raphy_protocol::ClientToServerMessage::UpdateConfig(task_id, config) => {
                 self.handle_c2s_update_config(c2s.id, task_id, config)
             }
@@ -392,7 +538,10 @@ async fn unix(
         tokio::select! {
             result = listener.accept() => {
                 let stream = match result {
-                   Ok((stream, _)) => stream,
+                   Ok((stream, addr)) => {
+                          tracing::info!(?addr, "accepted incoming connection from unix socket");
+                        stream
+                   },
                    Err(error) => {
                        tracing::error!("failed to accept incoming connection from unix socket: {error}");
                        continue;
@@ -434,7 +583,10 @@ async fn tcp(
         tokio::select! {
             result = listener.accept() => {
                 let stream = match result {
-                    Ok((stream, _)) => stream,
+                    Ok((stream, addr)) => {
+                        tracing::info!(?addr, "accepted incoming connection from tcp listener");
+                        stream
+                    },
                     Err(error) => {
                         tracing::error!("failed to accept incoming connection from TCP listener: {error}");
                         continue;
