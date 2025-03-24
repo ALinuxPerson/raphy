@@ -1,11 +1,13 @@
 import React from "react";
+import {Operation, ServerStateKind} from "../../utils/server.ts";
 
 interface ControlButtonProps {
     isConfigMissing: boolean;
-    onStart: () => Promise<void>;
-    onStop: () => Promise<void>;
-    onRestart: () => Promise<void>;
-    serverStatus: 'stopped' | 'running' | 'restarting';
+    onStart: () => void;
+    onStop: () => void;
+    onRestart: () => void;
+    serverStateKind: ServerStateKind;
+    operationInProgress: Operation | null;
 }
 
 const ControlButtons: React.FC<ControlButtonProps> = ({
@@ -13,23 +15,41 @@ const ControlButtons: React.FC<ControlButtonProps> = ({
                                                           onStart,
                                                           onStop,
                                                           onRestart,
-                                                          serverStatus
+                                                          serverStateKind,
+                                                          operationInProgress
                                                       }) => {
-    const isRunning = serverStatus === 'running';
-    const isStopped = serverStatus === 'stopped';
-    const isRestarting = serverStatus === 'restarting';
+    // Determine if any operation is currently in progress
+    const isOperationInProgress = operationInProgress !== null;
+
+    // Button states
+    const isStartDisabled = isConfigMissing || isOperationInProgress || serverStateKind === "Started";
+    const isStopDisabled = isConfigMissing || isOperationInProgress || serverStateKind === "Stopped";
+    const isRestartDisabled = isConfigMissing || isOperationInProgress || serverStateKind === "Stopped";
+
+    // Button titles
+    const startTitle = isConfigMissing ? "Configuration is missing" :
+        isOperationInProgress ? "Operation in progress" :
+            serverStateKind === "Started" ? "Server is already running" : "Start server";
+
+    const stopTitle = isConfigMissing ? "Configuration is missing" :
+        isOperationInProgress ? "Operation in progress" :
+            serverStateKind === "Stopped" ? "Server is already stopped" : "Stop server";
+
+    const restartTitle = isConfigMissing ? "Configuration is missing" :
+        isOperationInProgress ? "Operation in progress" :
+            serverStateKind === "Stopped" ? "Server is not running" : "Restart server";
 
     return (
         <div className="flex space-x-4">
             {/* Start Button */}
             <button
                 onClick={onStart}
-                disabled={isConfigMissing || isRunning || isRestarting}
+                disabled={isStartDisabled}
                 className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-all duration-200
-                    ${isRunning || isRestarting
+                    ${isStartDisabled
                     ? 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
                     : 'bg-green-500 text-white hover:bg-green-600 active:bg-green-700'}`}
-                title={isRunning ? "Server is already running" : isRestarting ? "Server is restarting" : "Start server"}
+                title={startTitle}
             >
                 <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                      strokeLinecap="round" strokeLinejoin="round">
@@ -41,12 +61,12 @@ const ControlButtons: React.FC<ControlButtonProps> = ({
             {/* Stop Button */}
             <button
                 onClick={onStop}
-                disabled={isConfigMissing || isStopped || isRestarting}
+                disabled={isStopDisabled}
                 className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-all duration-200
-                    ${isStopped || isRestarting
+                    ${isStopDisabled
                     ? 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
                     : 'bg-red-500 text-white hover:bg-red-600 active:bg-red-700'}`}
-                title={isStopped ? "Server is already stopped" : isRestarting ? "Server is restarting" : "Stop server"}
+                title={stopTitle}
             >
                 <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                      strokeLinecap="round" strokeLinejoin="round">
@@ -58,12 +78,12 @@ const ControlButtons: React.FC<ControlButtonProps> = ({
             {/* Restart Button */}
             <button
                 onClick={onRestart}
-                disabled={isConfigMissing || isStopped || isRestarting}
+                disabled={isRestartDisabled}
                 className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-all duration-200
-                    ${isStopped || isRestarting
+                    ${isRestartDisabled
                     ? 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
                     : 'bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700'}`}
-                title={isStopped ? "Server must be running to restart" : isRestarting ? "Server is already restarting" : "Restart server"}
+                title={restartTitle}
             >
                 <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                      strokeLinecap="round" strokeLinejoin="round">

@@ -41,6 +41,7 @@ impl Clone for ClientReader {
 pub struct NotALocalClient;
 
 enum ClientToServerMessage {
+    Ping(oneshot::Sender<()>),
     GetConfig(oneshot::Sender<Option<Config>>),
     UpdateConfig(Config, oneshot::Sender<()>),
     PerformOperation(Operation, oneshot::Sender<anyhow::Result<()>>),
@@ -52,6 +53,14 @@ enum ClientToServerMessage {
 pub struct ClientWriter(UnboundedSender<ClientToServerMessage>);
 
 impl ClientWriter {
+    pub async fn ping(&self) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .send(ClientToServerMessage::Ping(tx))
+            .context("c2s channel closed")?;
+        rx.await.context("tx dropped")
+    }
+    
     pub async fn get_config(&self) -> anyhow::Result<Option<Config>> {
         let (tx, rx) = oneshot::channel();
         self.0
@@ -125,13 +134,24 @@ async fn client_writer_task_handle_message(
     reader: &mut ClientReader,
 ) -> anyhow::Result<()> {
     match message {
+        ClientToServerMessage::Ping(rx) => {
+            tracing::debug!("receive ping");
+            let task_id = writer.ping().await.context("failed to send ping message")?;
+            let ServerToClientMessage::Pong(..) = reader
+                .expect(|m| m.task_id() == Some(task_id))
+                .await
+                .context("failed to receive pong message")?
+            else {
+                anyhow::bail!("got unexpected s2c message, expected Pong");
+            };
+            rx.send(()).ok();
+            Ok(())
+        }
         ClientToServerMessage::GetConfig(rx) => {
-            tracing::debug!("client writer task handle message get config");
             let task_id = writer
                 .get_config()
                 .await
                 .context("failed to send get config message")?;
-            tracing::debug!(?task_id, "received task id");
             let ServerToClientMessage::CurrentConfig(config, ..) = reader
                 .expect(|m| m.task_id() == Some(task_id))
                 .await

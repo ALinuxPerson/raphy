@@ -117,7 +117,15 @@ impl ClientWriter {
         let mut buf = Vec::with_capacity(4 + data.len());
         buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
         buf.extend(data);
+        tracing::debug!(?buf);
         self.0.write_all(&buf).await.map_err(Into::into)
+    }
+    
+    pub async fn ping(&mut self) -> Result<TaskId, SendMessageError> {
+        let task_id = TaskId::generate();
+        self.send_message(ClientToServerMessage::Ping(task_id))
+            .await?;
+        Ok(task_id)
     }
 
     pub async fn get_config(&mut self) -> Result<TaskId, SendMessageError> {

@@ -3,6 +3,7 @@ mod error;
 mod utils;
 
 use bincode::{Decode, Encode};
+use serde::{Deserialize, Serialize};
 pub use config::Config;
 pub use error::SerdeError;
 
@@ -10,14 +11,14 @@ pub const SERVICE_TYPE: &str = "_raphy._tcp.local.";
 pub const INSTANCE_NAME: &str = "Raphy";
 pub const UNIX_SOCKET_PATH: &str = "/tmp/raphy.sock";
 
-#[derive(Encode, Decode, Debug, Copy, Clone)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Operation {
     Start,
     Stop,
     Restart,
 }
 
-#[derive(Encode, Decode, Debug, Copy, Clone)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum ExitStatus {
     Success,
     Failure,
@@ -33,7 +34,7 @@ impl From<std::process::ExitStatus> for ExitStatus {
     }
 }
 
-#[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Id(u64);
 
 impl Id {
@@ -57,7 +58,7 @@ impl TaskId {
     }
 }
 
-#[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct OperationId(Id);
 
 impl OperationId {
@@ -68,6 +69,7 @@ impl OperationId {
 
 #[derive(Debug, Encode, Decode)]
 pub enum ClientToServerMessage {
+    Ping(TaskId),
     GetConfig(TaskId),
     UpdateConfig(TaskId, Config),
     PerformOperation(TaskId, Operation),
@@ -88,14 +90,21 @@ impl ClientToServerMessage {
     }
 }
 
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone)]
+pub enum ServerState {
+    Started,
+    Stopped(Option<ExitStatus>),
+}
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum ServerToClientMessage {
+    Pong(TaskId),
     CurrentConfig(Option<Config>, TaskId),
     ConfigUpdated(Config, Option<TaskId>),
     OperationRequested(Operation, OperationId),
     OperationPerformed(Operation, OperationId, Option<TaskId>),
     OperationFailed(Operation, OperationId, SerdeError, Option<TaskId>),
-    ServerUnexpectedlyExited(Option<ExitStatus>),
+    ServerStateUpdated(ServerState),
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
     FatalError(SerdeError),
@@ -106,7 +115,7 @@ pub enum ServerToClientMessage {
 impl ServerToClientMessage {
     pub fn task_id(&self) -> Option<TaskId> {
         match self {
-            Self::CurrentConfig(_, task_id) => Some(*task_id),
+            Self::Pong(task_id) | Self::CurrentConfig(_, task_id) => Some(*task_id),
             Self::ConfigUpdated(_, task_id)
             | Self::OperationPerformed(_, _, task_id)
             | Self::OperationFailed(_, _, _, task_id)

@@ -4,27 +4,69 @@ use anyhow::Context;
 use indexmap::IndexMap;
 use mdns_sd::ServiceEvent;
 use native_dialog::MessageType;
-use raphy_client::managed::ClientReader;
+use raphy_client::managed::{ClientReader, ClientWriter};
 use raphy_client::ClientMode;
 use raphy_protocol::{ServerToClientMessage, UNIX_SOCKET_PATH};
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{App, AppHandle, Emitter, Manager, Wry};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-pub fn config_updated(runtime: &Runtime, mut reader: ClientReader, app: AppHandle) {
+pub fn emit_message_on_connection_failure(runtime: &Runtime, writer: ClientWriter, app: AppHandle) {
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        interval.tick().await;
+        
+        loop {
+            let did_fail = match tokio::time::timeout(Duration::from_secs(30), writer.ping()).await {
+                Ok(Ok(())) => false,
+                Ok(Err(error)) => {
+                    tracing::error!(?error, "failed to send ping message: {error:#}");
+                    true
+                }
+                Err(elapsed) => {
+                    tracing::error!("ping timeout: {elapsed:?}");
+                    true
+                }
+            };
+            
+            if did_fail {
+                app.emit("connection-failure", ()).unwrap();
+                break;
+            } else {
+                interval.tick().await;
+                continue
+            }
+        }
+    });
+}
+
+pub fn emit_message_on_s2c(runtime: &Runtime, mut reader: ClientReader, app: AppHandle) {
     runtime.spawn(async move {
         while let Some(message) = reader.recv().await {
-            if let ServerToClientMessage::ConfigUpdated(config, _) = message {
-                let config = match config.resolve() {
-                    Ok(config) => config,
-                    Err(error) => {
-                        tracing::error!(?error, "failed to resolve the config");
-                        continue;
-                    }
-                };
-                app.emit("config-updated", config).unwrap();
+            match message {
+                ServerToClientMessage::ConfigUpdated(config, _) => {
+                    let config = match config.resolve() {
+                        Ok(config) => config,
+                        Err(error) => {
+                            tracing::error!(?error, "failed to resolve the config");
+                            continue;
+                        }
+                    };
+                    app.emit("config-updated", config).unwrap();
+                }
+                ServerToClientMessage::OperationRequested(op, id) => app.emit("operation-requested", (op, id)).unwrap(),
+                ServerToClientMessage::OperationPerformed(op, id, _) => app.emit("operation-performed", (op, id)).unwrap(),
+                ServerToClientMessage::OperationFailed(op, id, error, _) => app.emit("operation-failed", (op, id, error.to_string())).unwrap(),
+                ServerToClientMessage::ServerStateUpdated(state) => app.emit("server-state-updated", state).unwrap(),
+                ServerToClientMessage::Stdout(buf) => app.emit("stdout", String::from_utf8_lossy(&buf)).unwrap(),
+                ServerToClientMessage::Stderr(buf) => app.emit("stderr", String::from_utf8_lossy(&buf)).unwrap(),
+                ServerToClientMessage::FatalError(error) => app.emit("fatal-error", error.to_string()).unwrap(),
+                ServerToClientMessage::Error(error, _) => app.emit("error", error).unwrap(),
+                ServerToClientMessage::ShuttingDown => app.emit("shutting-down", ()).unwrap(),
+                _ => continue,
             }
         }
     });
@@ -98,9 +140,9 @@ fn real_setup(app: &mut App<Wry>, client_mode: ClientMode) -> anyhow::Result<()>
         }
     };
 
-    if let Some((reader, _)) = &client {
-        let reader = reader.clone();
-        config_updated(&runtime, reader, app.handle().clone());
+    if let Some((reader, writer)) = &client {
+        emit_message_on_s2c(&runtime, reader.clone(), app.handle().clone());
+        emit_message_on_connection_failure(&runtime, writer.clone(), app.handle().clone())
     }
 
     app.manage(commands::AppState {

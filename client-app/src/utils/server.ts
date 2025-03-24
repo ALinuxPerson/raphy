@@ -109,3 +109,30 @@ export const startServer = async (): Promise<void> => {
 export const restartServer = async (): Promise<void> => {
     await invoke('restart_server');
 }
+
+export type ServerState = "Started" | StoppedServerState;
+
+export interface StoppedServerState {
+    Stopped?: ExitStatus;
+}
+
+export enum ExitStatus {
+    Success = 'Success',
+    Failure = 'Failure'
+}
+
+export type ServerStateKind = "Started" | "Stopped";
+
+export function getServerStateKind(state: ServerState): ServerStateKind {
+    if (state === 'Started') {
+        return "Started";
+    } else {
+        return "Stopped";
+    }
+}
+
+export enum Operation {
+    Start = 'Start',
+    Stop = 'Stop',
+    Restart = 'Restart'
+}

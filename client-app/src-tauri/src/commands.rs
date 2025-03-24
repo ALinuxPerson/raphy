@@ -71,11 +71,13 @@ pub async fn connect_to_server(
     .context("Failed to connect to the server.")?;
 
     let client_reader = client.0.clone();
+    let client_writer = client.1.clone();
 
     tracing::debug!("lock client structure and replace with new client");
     state.client.lock().await.replace(client);
 
-    setup::config_updated(&state.runtime, client_reader.clone(), app_handle);
+    setup::emit_message_on_s2c(&state.runtime, client_reader, app_handle.clone());
+    setup::emit_message_on_connection_failure(&state.runtime, client_writer, app_handle);
 
     tracing::info!("connected to server");
 

@@ -1,5 +1,6 @@
+use crate::child;
 use crate::child::ServerToChildMessage;
-use raphy_protocol::{Config, Operation};
+use raphy_protocol::{Config, Operation, ServerState};
 use std::process::ExitStatus;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -17,7 +18,7 @@ pub enum NetworkToServerMessage {
 pub enum ChildToServerMessage {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    UnexpectedExit(Option<ExitStatus>),
+    UpdateState(ServerState),
 }
 
 pub struct ServerTask {
@@ -53,12 +54,16 @@ impl ServerTask {
             .expect("subsystem handle is not yet initialized")
     }
 
-    fn handle_n2s(&mut self, message: NetworkToServerMessage) {
+    async fn handle_n2s(&mut self, message: NetworkToServerMessage) {
         match message {
             NetworkToServerMessage::GetConfig(ret) => {
                 ret.send(self.config.clone()).ok().unwrap();
             }
             NetworkToServerMessage::UpdateConfig(config, ret) => {
+                if let Err(error) = config.dump().await {
+                    tracing::error!(?error, "failed to save the configuration: {error:#}");
+                }
+
                 self.config = Some(config.clone());
                 self.s2ch_tx
                     .send(ServerToChildMessage::UpdateConfig(config))
@@ -85,15 +90,23 @@ impl ServerTask {
 
     fn handle_ch2s(&self, message: ChildToServerMessage) {
         match message {
-            ChildToServerMessage::Stdout(out) => self
-                .global_s2c_tx
-                .send(raphy_protocol::ServerToClientMessage::Stdout(out))
-                .unwrap(),
-            ChildToServerMessage::Stderr(err) => self
-                .global_s2c_tx
-                .send(raphy_protocol::ServerToClientMessage::Stderr(err))
-                .unwrap(),
-            ChildToServerMessage::UnexpectedExit(exit_status) => todo!(),
+            ChildToServerMessage::Stdout(out) => {
+                self.global_s2c_tx
+                    .send(raphy_protocol::ServerToClientMessage::Stdout(out))
+                    .ok();
+            }
+            ChildToServerMessage::Stderr(err) => {
+                self.global_s2c_tx
+                    .send(raphy_protocol::ServerToClientMessage::Stderr(err))
+                    .ok();
+            }
+            ChildToServerMessage::UpdateState(state) => {
+                self.global_s2c_tx
+                    .send(raphy_protocol::ServerToClientMessage::ServerStateUpdated(
+                        state,
+                    ))
+                    .ok();
+            }
         }
     }
 
@@ -103,7 +116,7 @@ impl ServerTask {
 
         loop {
             tokio::select! {
-                Some(message) = self.n2s_rx.recv() => self.handle_n2s(message),
+                Some(message) = self.n2s_rx.recv() => self.handle_n2s(message).await,
                 Some(message) = self.ch2s_rx.recv() => self.handle_ch2s(message),
                 () = sh.on_shutdown_requested() => break,
             }

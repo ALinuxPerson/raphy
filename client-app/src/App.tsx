@@ -4,6 +4,8 @@ import { useState, useEffect } from "react";
 import MainPage from "./pages/MainPage.tsx";
 import { ClientMode } from "./utils/server.ts";
 import { clientModeStore } from "./utils/clientModeStore.ts";
+import { ConnectionProvider } from "./contexts/ConnectionContext.tsx";
+import ConnectionFailureOverlay from "./components/ConnectionFailureOverlay.tsx";
 
 function App() {
     const [currentPage, setCurrentPage] = useState<"setup" | "main">("setup");
@@ -31,13 +33,16 @@ function App() {
         return <div>Loading...</div>;
     }
 
-    return (<>
-        <div>
-            {currentPage === "setup"
-            ? <SetupPage navigateToMainPage={navigateToMainPage} />
-            : <MainPage clientMode={mode} />}
-        </div>
-    </>);
+    return (
+        <ConnectionProvider>
+            <div>
+                {currentPage === "setup"
+                    ? <SetupPage navigateToMainPage={navigateToMainPage} />
+                    : <MainPage clientMode={mode} />}
+            </div>
+            <ConnectionFailureOverlay />
+        </ConnectionProvider>
+    );
 }
 
 export default App;

@@ -1,60 +1,140 @@
-import { useState } from "react";
+import {useEffect, useState} from "react";
 import Header from "../components/main/Header";
 import ServerStatus from "../components/main/ServerStatus";
 import ConfigSection from "../components/main/ConfigSection";
 import ControlButtons from "../components/main/ControlButtons";
 import Console from "../components/main/Console";
-import {ClientMode, restartServer, startServer, stopServer} from "../utils/server.ts";
+import {
+    ClientMode,
+    getServerStateKind, Operation,
+    restartServer,
+    ServerState,
+    ServerStateKind,
+    startServer,
+    stopServer
+} from "../utils/server.ts";
+import {listen} from "@tauri-apps/api/event";
+
+// Show a toast notification (in Apple style)
+const showNotification = (title: string, message: string, type: 'info' | 'warning' | 'error') => {
+    // Create and show a notification element
+    const notificationContainer = document.createElement('div');
+    notificationContainer.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg animate-fadeIn z-50 ${
+        type === 'error' ? 'bg-red-50 border border-red-200 dark:bg-red-900/20 dark:border-red-800' :
+            type === 'warning' ? 'bg-yellow-50 border border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800' :
+                'bg-blue-50 border border-blue-200 dark:bg-blue-900/20 dark:border-blue-800'
+    }`;
+
+    const icon = type === 'error' ?
+        '<svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>' :
+        type === 'warning' ?
+            '<svg class="w-5 h-5 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>' :
+            '<svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+
+    notificationContainer.innerHTML = `
+            <div class="flex items-start">
+                <div class="flex-shrink-0">
+                    ${icon}
+                </div>
+                <div class="ml-3 w-0 flex-1">
+                    <p class="text-sm font-medium ${
+        type === 'error' ? 'text-red-800 dark:text-red-400' :
+            type === 'warning' ? 'text-yellow-800 dark:text-yellow-400' :
+                'text-blue-800 dark:text-blue-400'
+    }">${title}</p>
+                    <p class="mt-1 text-sm ${
+        type === 'error' ? 'text-red-700 dark:text-red-300' :
+            type === 'warning' ? 'text-yellow-700 dark:text-yellow-300' :
+                'text-blue-700 dark:text-blue-300'
+    }">${message}</p>
+                </div>
+                <div class="ml-4 flex-shrink-0 flex">
+                    <button class="inline-flex text-gray-400 hover:text-gray-500">
+                        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        `;
+
+    document.body.appendChild(notificationContainer);
+
+    // Attach close event
+    const closeButton = notificationContainer.querySelector('button');
+    if (closeButton) {
+        closeButton.addEventListener('click', () => {
+            notificationContainer.classList.add('animate-fadeOut');
+            setTimeout(() => {
+                notificationContainer.remove();
+            }, 300);
+        });
+    }
+
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        if (document.body.contains(notificationContainer)) {
+            notificationContainer.classList.add('animate-fadeOut');
+            setTimeout(() => {
+                if (document.body.contains(notificationContainer)) {
+                    notificationContainer.remove();
+                }
+            }, 300);
+        }
+    }, 5000);
+};
 
 const MainPage = (clientMode: ClientMode) => {
     const [showConsole, setShowConsole] = useState(false);
-    const [serverStatus, setServerStatus] = useState<'stopped' | 'running' | 'restarting'>('stopped');
+    const [operationInProgress, setOperationInProgress] = useState<Operation | null>(null);
+    const [serverStateKind, setServerStateKind] = useState<ServerStateKind>("Stopped");
     const [isConfigMissing, setIsConfigMissing] = useState(true);
 
     const toggleConsole = () => {
         setShowConsole(!showConsole);
     };
 
-    const handleStart = async () => {
-        try {
-            await startServer();
-        } catch (error) {
-            console.error("Failed to start the server: ", error);
-            return;
-        }
+    useEffect(() => {
+        const operationRequestedUnlisten = listen("operation-requested", (event) => {
+            const [operation, _] = event.payload as [Operation, string];
+            setOperationInProgress(operation);
+        });
+        const operationPerformedUnlisten = listen("operation-performed", (_event) => {
+            setOperationInProgress(null);
+        });
+        const operationFailedUnlisten = listen("operation-failed", (event) => {
+            const [operation, _, error] = event.payload as [string, string, string];
 
-        setServerStatus('running');
-    };
+            if (operation === "Start") {
+                showNotification("Operation Failed", `Failed to start server.\n${error}`, 'error');
+            } else if (operation === "Stop") {
+                showNotification("Operation Failed", `Failed to stop server.\n${error}`, 'error');
+            } else if (operation === "Restart") {
+                showNotification("Operation Failed", `Failed to restart server.\n${error}`, 'error');
+            }
 
-    const handleStop = async () => {
-        try {
-            await stopServer();
-        } catch (error) {
-            console.error("Failed to stop the server: ", error);
-            return;
-        }
-        setServerStatus('stopped');
-    };
+            setOperationInProgress(operationInProgress)
+        });
+        const serverStateUpdatedUnlisten = listen<ServerState>("server-state-updated", (event) => {
+            const state = event.payload;
 
-    const handleRestart = async () => {
-        setServerStatus('restarting');
+            setServerStateKind(getServerStateKind(state));
+        });
 
-        try {
-            await restartServer();
-        } catch (error) {
-            console.error("Failed to restart the server: ", error);
-            return;
-        }
-
-        setServerStatus('running');
-    };
+        return () => {
+            operationRequestedUnlisten.then(fn => fn());
+            operationPerformedUnlisten.then(fn => fn());
+            operationFailedUnlisten.then(fn => fn());
+            serverStateUpdatedUnlisten.then(fn => fn());
+        };
+    }, []);
 
     return (
         <div className="flex flex-col h-screen bg-white dark:bg-gray-900 text-black dark:text-white">
             <Header />
 
             <div className="flex-1 container mx-auto px-4 py-6 overflow-hidden flex flex-col">
-                <ServerStatus status={serverStatus} />
+                <ServerStatus serverStateKind={serverStateKind}/>
 
                 <div className="flex-1 flex flex-col md:flex-row mt-6 gap-6">
                     <div className="flex-1">
@@ -71,10 +151,11 @@ const MainPage = (clientMode: ClientMode) => {
                 <div className="mt-6 flex justify-between items-center">
                     <ControlButtons
                         isConfigMissing={isConfigMissing}
-                        onStart={handleStart}
-                        onStop={handleStop}
-                        onRestart={handleRestart}
-                        serverStatus={serverStatus}
+                        onStart={() => void startServer()}
+                        onStop={() => void stopServer()}
+                        onRestart={() => void restartServer()}
+                        serverStateKind={serverStateKind}
+                        operationInProgress={operationInProgress}
                     />
 
                     <button

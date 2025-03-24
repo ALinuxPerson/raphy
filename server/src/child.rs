@@ -1,9 +1,9 @@
 use crate::base::ChildToServerMessage;
 use anyhow::Context;
-use raphy_protocol::Config;
+use raphy_protocol::{Config, ServerState};
 use std::io;
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -21,7 +21,6 @@ pub enum ServerToChildMessage {
 enum State {
     Running {
         std: NestedSubsystem<anyhow::Error>,
-        waiter_rx: Option<oneshot::Receiver<io::Result<ExitStatus>>>,
         stdin_tx: UnboundedSender<Vec<u8>>,
     },
     Stopped,
@@ -31,6 +30,8 @@ pub struct ChildTask {
     state: State,
     s2c_rx: UnboundedReceiver<ServerToChildMessage>,
     c2s_tx: UnboundedSender<ChildToServerMessage>,
+    dead_tx: UnboundedSender<()>,
+    dead_rx: UnboundedReceiver<()>,
     config: Option<Config>,
     sh: Option<Arc<SubsystemHandle<anyhow::Error>>>,
 }
@@ -41,10 +42,13 @@ impl ChildTask {
         c2s_tx: UnboundedSender<ChildToServerMessage>,
         config: Option<Config>,
     ) -> Self {
+        let (dead_tx, dead_rx) = mpsc::unbounded_channel();
         Self {
             state: State::Stopped,
             s2c_rx,
             c2s_tx,
+            dead_tx,
+            dead_rx,
             config,
             sh: None,
         }
@@ -79,17 +83,21 @@ async fn output_subsystem(
         let mut buffer = vec![0; 1024];
         let n = tokio::select! {
             result = reader.read(&mut buffer) => match result {
+                Ok(0) => {
+                    sh.on_shutdown_requested().await;
+                    break
+                }
                 Ok(n) => n,
                 Err(error) => {
                     tracing::error!("failed to read from {std}: {error}");
-                    continue
+                    sh.request_local_shutdown();
+                    break
                 }
             },
             () = sh.on_shutdown_requested() => break,
         };
 
-        buffer.truncate(n);
-        tx.send(buffer).unwrap();
+        tx.send(buffer[..n].to_vec()).ok();
     }
 
     Ok(())
@@ -102,7 +110,7 @@ impl ChildTask {
         }
     }
 
-    async fn handle_s2c_start(&mut self) -> anyhow::Result<()> {
+    fn handle_s2c_start(&mut self) -> anyhow::Result<()> {
         if matches!(self.state, State::Running { .. }) {
             return Ok(());
         }
@@ -125,18 +133,23 @@ impl ChildTask {
             }
             None => Command::new(&*java_path),
         };
-        let mut child = command
+        
+        let child = command
             .arg("-jar")
             .arg(&config.server_jar_path)
             .args(args.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        
+        let child_std = child.as_std();
+        tracing::debug!(program = ?child_std.get_program(), args = ?child_std.get_args(), "starting server process");
+
+        let mut child = command
             .spawn()
             .context("Failed to start the server process.")?;
 
         let c2s_tx = self.c2s_tx.clone();
-        let (stdin_tx_tx, stdin_tx_rx) = oneshot::channel();
         let mut stdin = child
             .stdin
             .take()
@@ -149,22 +162,25 @@ impl ChildTask {
             .stderr
             .take()
             .expect("child did not have a handle to stderr");
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let root = self.sh().start(SubsystemBuilder::new("std", |sh| async move {
-            let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            stdin_tx_tx.send(stdin_tx).unwrap();
-            sh.start(SubsystemBuilder::new("in", |sh| async move {
-                loop {
-                    tokio::select! {
+            sh.start(SubsystemBuilder::new("in", {
+                |sh| async move {
+                    loop {
+                        tokio::select! {
                             Some(input) = stdin_rx.recv() => {
                                 if let Err(error) = stdin.write_all(&input).await {
                                     tracing::error!("failed to write to stdin: {error}");
+                                    sh.request_local_shutdown();
+                                    break
                                 }
                             },
                             () = sh.on_shutdown_requested() => break,
                         }
-                }
+                    }
 
-                Ok::<_, anyhow::Error>(())
+                    Ok::<_, anyhow::Error>(())
+                }
             }));
 
             let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
@@ -177,11 +193,15 @@ impl ChildTask {
                 output_subsystem(stderr, stderr_tx, sh, "stderr").await
             }));
 
-            sh.start(SubsystemBuilder::new("helper", |sh| async move {
+            sh.start(SubsystemBuilder::new("channel-helper", |sh| async move {
                 loop {
                     tokio::select! {
-                        Some(buf) = stdout_rx.recv() => c2s_tx.send(ChildToServerMessage::Stdout(buf)).unwrap(),
-                        Some(buf) = stderr_rx.recv() => c2s_tx.send(ChildToServerMessage::Stderr(buf)).unwrap(),
+                        Some(buf) = stdout_rx.recv() => {
+                            c2s_tx.send(ChildToServerMessage::Stdout(buf)).ok();
+                        },
+                        Some(buf) = stderr_rx.recv() => {
+                            c2s_tx.send(ChildToServerMessage::Stderr(buf)).ok();
+                        },
                         () = sh.on_shutdown_requested() => break,
                     }
                 }
@@ -192,66 +212,78 @@ impl ChildTask {
             Ok::<_, anyhow::Error>(())
         }));
 
-        let (waiter_tx, waiter_rx) = oneshot::channel();
+        let dead_tx = self.dead_tx.clone();
+        let c2s_tx = self.c2s_tx.clone();
         self.sh()
             .start(SubsystemBuilder::new("waiter", |sh| async move {
-                waiter_tx.send(child.wait().await).unwrap();
+                match child.wait().await {
+                    Ok(exit_status) => {
+                        tracing::info!("server process exited with status code {exit_status}");
+
+                        c2s_tx
+                            .send(ChildToServerMessage::UpdateState(ServerState::Stopped(Some(exit_status.into()))))
+                            .ok();
+                    }
+                    Err(error) => {
+                        tracing::error!("failed to wait for the server process to exit: {error}");
+                        c2s_tx
+                            .send(ChildToServerMessage::UpdateState(ServerState::Stopped(None)))
+                            .ok();
+                    }
+                }
+                
+                dead_tx.send(()).ok();
+                
                 Ok::<_, anyhow::Error>(())
             }));
 
         self.state = State::Running {
             std: root,
-            waiter_rx: Some(waiter_rx),
-            stdin_tx: stdin_tx_rx.await.unwrap(),
+            stdin_tx,
         };
+        
+        self.c2s_tx.send(ChildToServerMessage::UpdateState(ServerState::Started)).ok();
 
         Ok(())
     }
 
     async fn handle_s2c_stop(&mut self) {
-        if let State::Running { std, waiter_rx, .. } = &mut self.state {
+        if let State::Running { std, .. } = &mut self.state {
             std.initiate_shutdown();
-
-            if let Some(waiter_rx) = waiter_rx.take() {
-                match waiter_rx.await.unwrap() {
-                    Ok(exit_status) => {
-                        tracing::info!("server process exited with status code {exit_status}");
-
-                        if !exit_status.success() {
-                            self.c2s_tx
-                                .send(ChildToServerMessage::UnexpectedExit(Some(exit_status)))
-                                .unwrap();
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!("failed to wait for the server process to exit: {error}");
-                        self.c2s_tx
-                            .send(ChildToServerMessage::UnexpectedExit(None))
-                            .unwrap()
-                    }
-                }
-            }
         }
+        
         self.state = State::Stopped;
     }
 
     async fn handle_s2c_restart(&mut self) -> anyhow::Result<()> {
         self.handle_s2c_stop().await;
-        self.handle_s2c_start().await
+        self.handle_s2c_start()
     }
 
     async fn handle_s2c(&mut self, message: ServerToChildMessage) {
         match message {
             ServerToChildMessage::Stdin(input) => self.handle_s2c_stdin(input),
             ServerToChildMessage::Start(ret) => {
-                ret.send(self.handle_s2c_start().await).unwrap();
+                let result = self.handle_s2c_start();
+
+                if let Err(error) = &result {
+                    tracing::error!(?error, "failed to start the server: {error:#}")
+                }
+
+                ret.send(result).unwrap();
             }
             ServerToChildMessage::Stop(ret) => {
                 self.handle_s2c_stop().await;
                 ret.send(Ok(())).unwrap()
             }
             ServerToChildMessage::Restart(ret) => {
-                ret.send(self.handle_s2c_restart().await).unwrap()
+                let result = self.handle_s2c_restart().await;
+
+                if let Err(error) = &result {
+                    tracing::error!(?error, "failed to restart the server: {error:#}")
+                }
+
+                ret.send(result).unwrap()
             }
             ServerToChildMessage::UpdateConfig(config) => self.config = Some(config),
         }

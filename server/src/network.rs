@@ -113,8 +113,14 @@ async fn read_subsystem_once(
 
             *len = None;
         }
-        Err(error) if matches!(error.kind(), io::ErrorKind::UnexpectedEof) => return ControlFlow::Break(Ok(())),
-        Err(error) => return ControlFlow::Break(Err(error).with_context(|| format!("failed to read from {}", kind.stream_label()))),
+        Err(error) if matches!(error.kind(), io::ErrorKind::UnexpectedEof) => {
+            return ControlFlow::Break(Ok(()));
+        }
+        Err(error) => {
+            return ControlFlow::Break(
+                Err(error).with_context(|| format!("failed to read from {}", kind.stream_label())),
+            );
+        }
     }
 
     ControlFlow::Continue(())
@@ -136,9 +142,9 @@ async fn read_subsystem(
                 ControlFlow::Continue(()) => continue,
                 ControlFlow::Break(result) => {
                     if let Err(error) = result {
-                        tracing::error!(?error, "{error:#}");                       
+                        tracing::error!(?error, "{error:#}");
                     }
-                    
+
                     destroy_tx.send(()).ok();
                     break;
                 }
@@ -157,6 +163,8 @@ async fn write_subsystem_once(
         return ControlFlow::Break(Ok(()));
     };
 
+    tracing::trace!(?s2c);
+
     let data = match bincode::encode_to_vec(s2c, bincode::config::standard())
         .with_context(|| format!("failed to encode message for {}", kind.stream_label()))
     {
@@ -164,17 +172,25 @@ async fn write_subsystem_once(
         Err(error) => return ControlFlow::Break(Err(error)),
     };
 
+    tracing::trace!(?data);
+
     let mut buf = Vec::with_capacity(4 + data.len());
     buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
     buf.extend(data);
 
-    match write_half
-        .write_all(&buf)
-        .await
-    {
-        Ok(_) => ControlFlow::Continue(()),
-        Err(error) if matches!(error.kind(), io::ErrorKind::BrokenPipe) => ControlFlow::Break(Ok(())),
-        Err(error) => ControlFlow::Break(Err(error).with_context(|| format!("failed to write to {}", kind.stream_label()))),
+    tracing::trace!(?buf);
+
+    match write_half.write_all(&buf).await {
+        Ok(_) => {
+            tracing::trace!("write successful");
+            ControlFlow::Continue(())
+        }
+        Err(error) if matches!(error.kind(), io::ErrorKind::BrokenPipe) => {
+            ControlFlow::Break(Ok(()))
+        }
+        Err(error) => ControlFlow::Break(
+            Err(error).with_context(|| format!("failed to write to {}", kind.stream_label())),
+        ),
     }
 }
 
@@ -214,11 +230,11 @@ struct MessageBroadcaster {
 impl MessageBroadcaster {
     pub fn broadcast(self, message: raphy_protocol::ServerToClientMessage) {
         if let Some((_, tx)) = self.active_task {
-            tx.send(message.clone()).unwrap();
+            tx.send(message.clone()).ok();
         }
 
         for tx in self.senders {
-            tx.send(message.clone()).unwrap();
+            tx.send(message.clone()).ok();
         }
     }
 
@@ -227,11 +243,11 @@ impl MessageBroadcaster {
         mut message_fn: impl FnMut(Option<TaskId>) -> raphy_protocol::ServerToClientMessage,
     ) {
         if let Some((task_id, tx)) = self.active_task {
-            tx.send(message_fn(Some(task_id))).unwrap();
+            tx.send(message_fn(Some(task_id))).ok();
         }
 
         for tx in &self.senders {
-            tx.send(message_fn(None)).unwrap();
+            tx.send(message_fn(None)).ok();
         }
     }
 }
@@ -276,8 +292,9 @@ impl NetworkTask {
     }
 
     fn broadcast_message(&self, message: raphy_protocol::ServerToClientMessage) {
+        tracing::debug!(?message, "broadcast message");
         for (_, client) in &self.clients {
-            client.s2c_tx.send(message.clone()).unwrap();
+            client.s2c_tx.send(message.clone()).ok();
         }
     }
 
@@ -412,9 +429,20 @@ impl NetworkTask {
 }
 
 impl NetworkTask {
+    fn handle_c2s_ping(&self, client_id: ClientId, task_id: TaskId) {
+        let Some(s2c_tx) = self.clients.get(client_id.0).map(|c| c.s2c_tx.clone()) else {
+            tracing::warn!("client {client_id} tried to ping the server, but it doesn't exist");
+            return;
+        };
+
+        s2c_tx
+            .send(raphy_protocol::ServerToClientMessage::Pong(task_id))
+            .ok();
+    }
+
     fn handle_c2s_get_config(&self, client_id: ClientId, task_id: TaskId) {
         let Some(s2c_tx) = self.clients.get(client_id.0).map(|c| c.s2c_tx.clone()) else {
-            tracing::warn!("client {client_id} tried to get the config, but it doesn't exist",);
+            tracing::warn!("client {client_id} tried to get the config, but it doesn't exist");
             return;
         };
 
@@ -429,8 +457,8 @@ impl NetworkTask {
                 .send(raphy_protocol::ServerToClientMessage::CurrentConfig(
                     config, task_id,
                 ))
-                .unwrap();
-            tracing::info!(?client_id, ?task_id, "finished responding to message");
+                .ok();
+            tracing::debug!(?client_id, ?task_id, "finished responding to message");
         });
     }
 
@@ -446,7 +474,7 @@ impl NetworkTask {
             message_broadcaster.broadcast_with_task_id(|tid| {
                 raphy_protocol::ServerToClientMessage::ConfigUpdated(config.clone(), tid)
             });
-            tracing::info!(?client_id, ?task_id, "finished responding to message");
+            tracing::debug!(?client_id, ?task_id, "finished responding to message");
         });
     }
 
@@ -481,7 +509,7 @@ impl NetworkTask {
                     )
                 }),
             }
-            tracing::info!(?client_id, ?task_id, "finished responding to message");
+            tracing::debug!(?client_id, ?task_id, "finished responding to message");
         });
     }
 
@@ -489,7 +517,7 @@ impl NetworkTask {
         self.n2s_tx
             .send(NetworkToServerMessage::Input(input))
             .unwrap();
-        tracing::info!("finished responding to input message");
+        tracing::debug!("finished responding to input message");
     }
 
     fn handle_c2s_shutdown(&self, id: ClientId) {
@@ -508,9 +536,12 @@ impl NetworkTask {
     }
 
     fn handle_c2s(&self, c2s: ClientToServerMessage) {
-        tracing::info!(?c2s, "received new message from a client");
+        tracing::debug!(?c2s, "received new message from a client");
 
         match c2s.data {
+            raphy_protocol::ClientToServerMessage::Ping(task_id) => {
+                self.handle_c2s_ping(c2s.id, task_id)
+            }
             raphy_protocol::ClientToServerMessage::GetConfig(task_id) => {
                 self.handle_c2s_get_config(c2s.id, task_id)
             }
