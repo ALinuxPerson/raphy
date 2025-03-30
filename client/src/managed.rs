@@ -1,5 +1,5 @@
 use anyhow::Context;
-use raphy_protocol::{Config, Operation, ServerToClientMessage};
+use raphy_protocol::{Config, Operation, ServerState, ServerToClientMessage};
 use std::io;
 use std::path::Path;
 use thiserror::Error;
@@ -52,6 +52,7 @@ enum ClientToServerMessage {
     Ping(oneshot::Sender<()>),
     GetConfig(oneshot::Sender<Option<Config>>),
     UpdateConfig(Config, oneshot::Sender<()>),
+    GetServerState(oneshot::Sender<ServerState>),
     PerformOperation(Operation, oneshot::Sender<anyhow::Result<()>>),
     Input(Vec<u8>),
     Shutdown(oneshot::Sender<Result<(), NotALocalClient>>),
@@ -84,6 +85,14 @@ impl ClientWriter {
             .context("c2s channel closed")?;
         rx.await.context("tx dropped")
     }
+    
+    pub async fn get_server_state(&self) -> anyhow::Result<ServerState> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .send(ClientToServerMessage::GetServerState(tx))
+            .context("c2s channel closed")?;
+        rx.await.context("tx dropped")
+    }
 
     pub async fn perform_operation(&self, operation: Operation) -> anyhow::Result<()> {
         tracing::info!("managed perform operation");
@@ -95,7 +104,7 @@ impl ClientWriter {
             .context("tx dropped")?
             .context("failed to perform operation")
     }
-
+    
     pub async fn input(&self, input: Vec<u8>) -> anyhow::Result<()> {
         self.0
             .send(ClientToServerMessage::Input(input))
@@ -183,6 +192,21 @@ async fn client_writer_task_handle_message(
                 anyhow::bail!("got unexpected s2c message, expected ConfigUpdated");
             };
             rx.send(()).ok();
+            Ok(())
+        }
+        ClientToServerMessage::GetServerState(rx) => {
+            let task_id = writer
+                .get_server_state()
+                .await
+                .context("failed to send get server state message")?;
+            let ServerToClientMessage::CurrentServerState(state, ..) = reader
+                .expect(|m| m.task_id() == Some(task_id))
+                .await
+                .context("failed to receive current server state message")?
+            else {
+                anyhow::bail!("got unexpected s2c message, expected CurrentServerState");
+            };
+            rx.send(state).ok();
             Ok(())
         }
         ClientToServerMessage::PerformOperation(operation, rx) => {

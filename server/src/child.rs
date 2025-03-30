@@ -18,6 +18,7 @@ pub enum ServerToChildMessage {
     Start(oneshot::Sender<anyhow::Result<()>>),
     Stop(oneshot::Sender<anyhow::Result<()>>),
     Restart(oneshot::Sender<anyhow::Result<()>>),
+    ServerState(oneshot::Sender<ServerState>),
     UpdateConfig(Config),
 }
 
@@ -37,6 +38,7 @@ pub struct ChildTask {
     dead_tx: UnboundedSender<()>,
     dead_rx: UnboundedReceiver<()>,
     sigterm_in_progress: bool,
+    restart_in_progress: bool,
     config: Option<Config>,
     sh: Option<Arc<SubsystemHandle<anyhow::Error>>>,
 }
@@ -55,6 +57,7 @@ impl ChildTask {
             dead_tx,
             dead_rx,
             sigterm_in_progress: false,
+            restart_in_progress: false,
             config,
             sh: None,
         }
@@ -79,6 +82,14 @@ impl ChildTask {
                     
                     if let State::Running { std, .. } = state {
                         std.initiate_shutdown();
+                    }
+                    
+                    if self.restart_in_progress {
+                        if let Err(error) = self.handle_s2c_start() {
+                            tracing::error!(?error, "failed to restart the server: {error:#}");
+                        }
+                        
+                        self.restart_in_progress = false;
                     }
                 },
                 () = sh.on_shutdown_requested() => break,
@@ -136,8 +147,12 @@ impl ChildTask {
             .java_path
             .resolve()
             .context("Failed to get the Java path.")?;
-        let args = config
-            .arguments
+        let java_args = config
+            .java_arguments
+            .resolve()
+            .context("Failed to get the Java arguments.")?;
+        let server_args = config
+            .server_arguments
             .resolve()
             .context("Failed to get the server arguments.")?;
         let mut command = match config.user.make_command() {
@@ -150,9 +165,10 @@ impl ChildTask {
         
         let child = command
             .current_dir(config.server_jar_path.parent().unwrap_or_else(|| Path::new("/")))
+            .args(java_args.iter())
             .arg("-jar")
             .arg(&config.server_jar_path)
-            .args(args.iter())
+            .args(server_args.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -265,7 +281,7 @@ impl ChildTask {
         Ok(())
     }
 
-    async fn handle_s2c_stop(&mut self) {
+    fn handle_s2c_stop(&mut self) {
         if let State::Running { pid: Some(pid), .. } = &mut self.state {
             let signal = if self.sigterm_in_progress {
                 Signal::SIGKILL
@@ -281,9 +297,10 @@ impl ChildTask {
         }
     }
 
-    async fn handle_s2c_restart(&mut self) -> anyhow::Result<()> {
-        self.handle_s2c_stop().await;
-        self.handle_s2c_start()
+    fn handle_s2c_restart(&mut self) -> anyhow::Result<()> {
+        self.handle_s2c_stop();
+        self.restart_in_progress = true;
+        Ok(())
     }
 
     async fn handle_s2c(&mut self, message: ServerToChildMessage) {
@@ -299,17 +316,24 @@ impl ChildTask {
                 ret.send(result).unwrap();
             }
             ServerToChildMessage::Stop(ret) => {
-                self.handle_s2c_stop().await;
+                self.handle_s2c_stop();
                 ret.send(Ok(())).unwrap()
             }
             ServerToChildMessage::Restart(ret) => {
-                let result = self.handle_s2c_restart().await;
+                let result = self.handle_s2c_restart();
 
                 if let Err(error) = &result {
                     tracing::error!(?error, "failed to restart the server: {error:#}")
                 }
 
                 ret.send(result).unwrap()
+            }
+            ServerToChildMessage::ServerState(ret) => {
+                let state = match &self.state {
+                    State::Running { .. } => ServerState::Started,
+                    State::Stopped => ServerState::Stopped(None),
+                };
+                ret.send(state).unwrap();
             }
             ServerToChildMessage::UpdateConfig(config) => self.config = Some(config),
         }

@@ -1,6 +1,6 @@
 pub mod resolved {
     use crate::Config;
-    use crate::config::{JavaPath, JavaPathKind, ServerArguments, User, UserKind};
+    use crate::config::{JavaPath, JavaPathKind, Arguments, User, UserKind};
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
@@ -9,7 +9,8 @@ pub mod resolved {
     pub struct ResolvedConfig {
         pub java_path: PathBuf,
         pub server_jar_path: PathBuf,
-        pub arguments: ServerArguments,
+        pub java_arguments: Arguments,
+        pub server_arguments: Arguments,
         pub user: Option<String>,
     }
 
@@ -31,7 +32,8 @@ pub mod resolved {
                             "Failed to get the Java path. Is Java installed in your system?",
                         )?,
                     server_jar_path: self.server_jar_path.clone(),
-                    arguments: self.arguments.clone(),
+                    server_arguments: self.server_arguments.clone(),
+                    java_arguments: self.java_arguments.clone(),
                     user: self.user.resolve().map(|u| u.to_owned()),
                 },
                 ConfigMask {
@@ -48,7 +50,8 @@ pub mod resolved {
                     JavaPathKind::Custom => JavaPath::Custom(config.java_path),
                 },
                 server_jar_path: config.server_jar_path,
-                arguments: config.arguments,
+                server_arguments: config.server_arguments,
+                java_arguments: config.java_arguments,
                 user: match (config.user, mask.user) {
                     (Some(user), UserKind::Specific) => User::Specific(user),
                     (_, UserKind::Current) => User::Current,
@@ -107,7 +110,7 @@ pub enum ServerArgumentsKind {
 }
 
 #[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone)]
-pub enum ServerArguments {
+pub enum Arguments {
     /// parse string using POSIX shell rules (`shlex`)
     Parsed(String),
 
@@ -115,7 +118,7 @@ pub enum ServerArguments {
     Manual(Vec<String>),
 }
 
-impl ServerArguments {
+impl Arguments {
     pub fn resolve(&self) -> anyhow::Result<Cow<[String]>> {
         match self {
             Self::Parsed(s) => Ok(Cow::Owned(shlex::split(s)
@@ -178,7 +181,8 @@ impl User {
 pub struct Config {
     pub java_path: JavaPath,
     pub server_jar_path: PathBuf,
-    pub arguments: ServerArguments,
+    pub java_arguments: Arguments,
+    pub server_arguments: Arguments,
     pub user: User,
 }
 

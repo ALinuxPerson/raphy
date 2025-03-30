@@ -178,6 +178,30 @@ pub async fn restart_server(state: State<'_, AppState>) -> anyhow_tauri::TAResul
     perform_operation(state, Operation::Restart, "restart").await
 }
 
+#[tauri::command]
+pub async fn get_server_state(
+    state: State<'_, AppState>,
+) -> anyhow_tauri::TAResult<raphy_protocol::ServerState> {
+    tracing::debug!("lock client structure");
+    let client = state.client.lock().await;
+    let client_writer = client
+        .as_ref()
+        .context("Not connected to a server.")?
+        .1
+        .clone();
+    drop(client);
+
+    tracing::debug!("get server state");
+    let server_state = client_writer
+        .get_server_state()
+        .await
+        .context("Failed to get the server state.")?;
+
+    tracing::debug!("server state retrieved");
+
+    Ok(server_state)
+}
+
 async fn real_stdin(state: &AppState, input: Vec<u8>) -> anyhow::Result<()> {
     let client = state.client.lock().await;
     let client_writer = client

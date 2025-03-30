@@ -1,13 +1,13 @@
 import React, {useEffect, useState} from 'react';
 import {
+    ArgumentsKind,
     ClientMode,
     ConfigMask,
     getServerConfig,
-    isManualServerArguments,
-    isParsedServerArguments,
+    isManualArguments,
+    isParsedArguments,
     JavaPathKind,
     ResolvedConfig,
-    ServerArgumentsKind,
     updateConfig,
     UserKind
 } from "../../utils/server.ts";
@@ -24,9 +24,12 @@ interface ConfigSectionProps {
 interface ConfigState {
     javaPath: string;
     serverPath: string;
-    parsedArguments: string;
-    manualArguments: string[];
-    serverArgumentsKind: ServerArgumentsKind;
+    parsedJavaArguments: string;
+    manualJavaArguments: string[];
+    javaArgumentsKind: ArgumentsKind;
+    parsedServerArguments: string;
+    manualServerArguments: string[];
+    serverArgumentsKind: ArgumentsKind;
     user: string | null;
     javaPathMask: JavaPathKind;
     userMask: UserKind;
@@ -180,9 +183,12 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
     const [config, setConfig] = useState<ConfigState>({
         javaPath: '',
         serverPath: '',
-        parsedArguments: '',
-        manualArguments: [],
-        serverArgumentsKind: ServerArgumentsKind.Parsed,
+        parsedJavaArguments: '',
+        manualJavaArguments: [],
+        javaArgumentsKind: ArgumentsKind.Parsed,
+        parsedServerArguments: '',
+        manualServerArguments: [],
+        serverArgumentsKind: ArgumentsKind.Parsed,
         user: null,
         javaPathMask: JavaPathKind.AutoDetect,
         userMask: UserKind.Current,
@@ -202,9 +208,13 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
                 const isChanged =
                     updated.javaPath !== originalConfig.javaPath ||
                     updated.serverPath !== originalConfig.serverPath ||
-                    updated.parsedArguments !== originalConfig.parsedArguments ||
-                    updated.manualArguments.length !== originalConfig.manualArguments.length ||
-                    updated.manualArguments.some((arg, i) => arg !== originalConfig.manualArguments[i]) ||
+                    updated.parsedJavaArguments !== originalConfig.parsedJavaArguments ||
+                    updated.manualJavaArguments.length !== originalConfig.manualJavaArguments.length ||
+                    updated.manualJavaArguments.some((arg, i) => arg !== originalConfig.manualJavaArguments[i]) ||
+                    updated.javaArgumentsKind !== originalConfig.javaArgumentsKind ||
+                    updated.parsedServerArguments !== originalConfig.parsedServerArguments ||
+                    updated.manualServerArguments.length !== originalConfig.manualServerArguments.length ||
+                    updated.manualServerArguments.some((arg, i) => arg !== originalConfig.manualServerArguments[i]) ||
                     updated.serverArgumentsKind !== originalConfig.serverArgumentsKind ||
                     updated.user !== originalConfig.user ||
                     updated.javaPathMask !== originalConfig.javaPathMask ||
@@ -223,26 +233,49 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
         configMask: ConfigMask,
         isChanged: boolean = false
     ): ConfigState => {
-        // Extract server arguments
-        let serverArgs = {
-            manualArguments: [] as string[],
-            parsedArguments: '',
-            serverArgumentsKind: ServerArgumentsKind.Parsed
+        // Extract java arguments
+        let javaArgs = {
+            manualJavaArguments: [] as string[],
+            parsedJavaArguments: '',
+            javaArgumentsKind: ArgumentsKind.Parsed
         };
 
-        if (isManualServerArguments(resolvedConfig.arguments)) {
-            serverArgs = {
-                ...serverArgs,
-                manualArguments: resolvedConfig.arguments.Manual,
-                serverArgumentsKind: ServerArgumentsKind.Manual
+        if (isManualArguments(resolvedConfig.java_arguments)) {
+            javaArgs = {
+                ...javaArgs,
+                manualJavaArguments: resolvedConfig.java_arguments.Manual,
+                javaArgumentsKind: ArgumentsKind.Manual
             };
         }
 
-        if (isParsedServerArguments(resolvedConfig.arguments)) {
+        if (isParsedArguments(resolvedConfig.java_arguments)) {
+            javaArgs = {
+                ...javaArgs,
+                parsedJavaArguments: resolvedConfig.java_arguments.Parsed,
+                javaArgumentsKind: ArgumentsKind.Parsed
+            };
+        }
+
+        // Extract server arguments
+        let serverArgs = {
+            manualServerArguments: [] as string[],
+            parsedServerArguments: '',
+            serverArgumentsKind: ArgumentsKind.Parsed
+        };
+
+        if (isManualArguments(resolvedConfig.server_arguments)) {
             serverArgs = {
                 ...serverArgs,
-                parsedArguments: resolvedConfig.arguments.Parsed,
-                serverArgumentsKind: ServerArgumentsKind.Parsed
+                manualServerArguments: resolvedConfig.server_arguments.Manual,
+                serverArgumentsKind: ArgumentsKind.Manual
+            };
+        }
+
+        if (isParsedArguments(resolvedConfig.server_arguments)) {
+            serverArgs = {
+                ...serverArgs,
+                parsedServerArguments: resolvedConfig.server_arguments.Parsed,
+                serverArgumentsKind: ArgumentsKind.Parsed
             };
         }
 
@@ -251,6 +284,7 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
             javaPath: resolvedConfig.java_path,
             serverPath: resolvedConfig.server_jar_path,
             ...serverArgs,
+            ...javaArgs,
             user: resolvedConfig.user,
             javaPathMask: configMask.java_path,
             userMask: configMask.user,
@@ -307,9 +341,12 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
         const resolvedConfig: ResolvedConfig = {
             java_path: config.javaPath,
             server_jar_path: config.serverPath,
-            arguments: config.serverArgumentsKind === ServerArgumentsKind.Parsed
-                ? {Parsed: config.parsedArguments}
-                : {Manual: config.manualArguments},
+            java_arguments: config.javaArgumentsKind === ArgumentsKind.Parsed
+                ? {Parsed: config.parsedJavaArguments}
+                : {Manual: config.manualJavaArguments},
+            server_arguments: config.serverArgumentsKind === ArgumentsKind.Parsed
+                ? {Parsed: config.parsedServerArguments}
+                : {Manual: config.manualServerArguments},
             user: config.user
         };
 
@@ -329,23 +366,42 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
 
     };
 
-    // Manual arguments handlers
-    const addArgument = () => {
+    // Manual java arguments handlers
+    const addJavaArgument = () => {
         updateComponentConfig({
-            manualArguments: [...config.manualArguments, '']
+            manualJavaArguments: [...config.manualServerArguments, '']
         });
     };
 
-    const updateArgument = (index: number, value: string) => {
-        const newArgs = [...config.manualArguments];
+    const updateJavaArgument = (index: number, value: string) => {
+        const newArgs = [...config.manualJavaArguments];
         newArgs[index] = value;
-        updateComponentConfig({manualArguments: newArgs});
+        updateComponentConfig({manualJavaArguments: newArgs});
     };
 
-    const removeArgument = (index: number) => {
-        const newArgs = [...config.manualArguments];
+    const removeJavaArgument = (index: number) => {
+        const newArgs = [...config.manualJavaArguments];
         newArgs.splice(index, 1);
-        updateComponentConfig({manualArguments: newArgs});
+        updateComponentConfig({manualJavaArguments: newArgs});
+    };
+
+    // Manual server arguments handlers
+    const addServerArgument = () => {
+        updateComponentConfig({
+            manualServerArguments: [...config.manualServerArguments, '']
+        });
+    };
+
+    const updateServerArgument = (index: number, value: string) => {
+        const newArgs = [...config.manualServerArguments];
+        newArgs[index] = value;
+        updateComponentConfig({manualServerArguments: newArgs});
+    };
+
+    const removeServerArgument = (index: number) => {
+        const newArgs = [...config.manualServerArguments];
+        newArgs.splice(index, 1);
+        updateComponentConfig({manualServerArguments: newArgs});
     };
 
     // If config is missing, show a notification
@@ -417,35 +473,68 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({clientMode, isConfigMissin
                     />
                 </div>
 
-                {/* Arguments */}
+                {/* Java Arguments */}
                 <div>
-                    <ToggleButtonGroup label="Server Arguments">
+                    <ToggleButtonGroup label="Java Arguments">
                         <ToggleButton
-                            active={config.serverArgumentsKind === ServerArgumentsKind.Parsed}
-                            onClick={() => updateComponentConfig({serverArgumentsKind: ServerArgumentsKind.Parsed})}
+                            active={config.javaArgumentsKind === ArgumentsKind.Parsed}
+                            onClick={() => updateComponentConfig({javaArgumentsKind: ArgumentsKind.Parsed})}
                         >
                             Parsed
                         </ToggleButton>
                         <ToggleButton
-                            active={config.serverArgumentsKind === ServerArgumentsKind.Manual}
-                            onClick={() => updateComponentConfig({serverArgumentsKind: ServerArgumentsKind.Manual})}
+                            active={config.javaArgumentsKind === ArgumentsKind.Manual}
+                            onClick={() => updateComponentConfig({javaArgumentsKind: ArgumentsKind.Manual})}
                         >
                             Manual
                         </ToggleButton>
                     </ToggleButtonGroup>
 
-                    {config.serverArgumentsKind === ServerArgumentsKind.Parsed ? (
+                    {config.javaArgumentsKind === ArgumentsKind.Parsed ? (
                         <TextInput
-                            value={config.parsedArguments}
-                            onChange={(value) => updateComponentConfig({parsedArguments: value})}
-                            placeholder="-Xmx4G -Xms1G nogui"
+                            value={config.parsedJavaArguments}
+                            onChange={(value) => updateComponentConfig({parsedJavaArguments: value})}
+                            placeholder="-Xmx4096M -Xms4096M"
                         />
                     ) : (
                         <ManualArgumentsList
-                            arguments={config.manualArguments}
-                            onUpdate={updateArgument}
-                            onRemove={removeArgument}
-                            onAdd={addArgument}
+                            arguments={config.manualJavaArguments}
+                            onUpdate={updateJavaArgument}
+                            onRemove={removeJavaArgument}
+                            onAdd={addJavaArgument}
+                        />
+                    )}
+                </div>
+
+                {/* Server Arguments */}
+                <div>
+                    <ToggleButtonGroup label="Server Arguments">
+                        <ToggleButton
+                            active={config.serverArgumentsKind === ArgumentsKind.Parsed}
+                            onClick={() => updateComponentConfig({serverArgumentsKind: ArgumentsKind.Parsed})}
+                        >
+                            Parsed
+                        </ToggleButton>
+                        <ToggleButton
+                            active={config.serverArgumentsKind === ArgumentsKind.Manual}
+                            onClick={() => updateComponentConfig({serverArgumentsKind: ArgumentsKind.Manual})}
+                        >
+                            Manual
+                        </ToggleButton>
+                    </ToggleButtonGroup>
+
+                    {config.serverArgumentsKind === ArgumentsKind.Parsed ? (
+                        <TextInput
+                            value={config.parsedServerArguments}
+                            onChange={(value) => updateComponentConfig({parsedServerArguments: value})}
+                            placeholder="nogui"
+                        />
+                    ) : (
+                        <ManualArgumentsList
+                            arguments={config.manualServerArguments}
+                            onUpdate={updateServerArgument}
+                            onRemove={removeServerArgument}
+                            onAdd={addServerArgument}
                         />
                     )}
                 </div>

@@ -44,7 +44,7 @@ export enum JavaPathKind {
     Custom = 'Custom'
 }
 
-export enum ServerArgumentsKind {
+export enum ArgumentsKind {
     Parsed = 'Parsed',
     Manual = 'Manual'
 }
@@ -54,35 +54,35 @@ export enum UserKind {
     Specific = 'Specific'
 }
 
-export interface ParsedServerArguments {
+export interface ParsedArguments {
     Parsed: string;
 }
 
-export function isParsedServerArguments(args: ServerArguments): args is ParsedServerArguments {
-    return (args as ParsedServerArguments).Parsed !== undefined;
+export function isParsedArguments(args: Arguments): args is ParsedArguments {
+    return (args as ParsedArguments).Parsed !== undefined;
 }
 
-export interface ManualServerArguments {
+export interface ManualArguments {
     Manual: string[];
 }
 
-export function isManualServerArguments(args: ServerArguments): args is ManualServerArguments {
-    return (args as ManualServerArguments).Manual !== undefined;
+export function isManualArguments(args: Arguments): args is ManualArguments {
+    return (args as ManualArguments).Manual !== undefined;
 }
 
-export type ServerArguments = ParsedServerArguments | ManualServerArguments;
+export type Arguments = ParsedArguments | ManualArguments;
 
-// TypeScript equivalents to Rust structs
 export interface ResolvedConfig {
     java_path: string;
     server_jar_path: string;
-    arguments: ServerArguments;
+    java_arguments: Arguments;
+    server_arguments: Arguments;
     user: string | null;
 }
 
 export interface ConfigMask {
     java_path: JavaPathKind;
-    arguments: ServerArgumentsKind;
+    arguments: ArgumentsKind;
     user: UserKind;
 }
 
@@ -135,4 +135,8 @@ export enum Operation {
     Start = 'Start',
     Stop = 'Stop',
     Restart = 'Restart'
+}
+
+export const getServerState = async (): Promise<ServerState> => {
+    return await invoke('get_server_state') as ServerState;
 }

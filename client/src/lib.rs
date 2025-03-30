@@ -141,6 +141,13 @@ impl ClientWriter {
             .await?;
         Ok(task_id)
     }
+    
+    pub async fn get_server_state(&mut self) -> Result<TaskId, SendMessageError> {
+        let task_id = TaskId::generate();
+        self.send_message(ClientToServerMessage::GetServerState(task_id))
+            .await?;
+        Ok(task_id)
+    }
 
     pub async fn perform_operation(
         &mut self,

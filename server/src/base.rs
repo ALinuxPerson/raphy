@@ -9,6 +9,7 @@ use tokio_graceful_shutdown::SubsystemHandle;
 
 pub enum NetworkToServerMessage {
     GetConfig(oneshot::Sender<Option<Config>>),
+    GetServerState(oneshot::Sender<ServerState>),
     UpdateConfig(Config, oneshot::Sender<()>),
     PerformOperation(Operation, oneshot::Sender<anyhow::Result<()>>),
     Input(Vec<u8>),
@@ -58,6 +59,9 @@ impl ServerTask {
         match message {
             NetworkToServerMessage::GetConfig(ret) => {
                 ret.send(self.config.clone()).ok().unwrap();
+            }
+            NetworkToServerMessage::GetServerState(ret) => {
+                self.s2ch_tx.send(ServerToChildMessage::ServerState(ret)).ok().unwrap();
             }
             NetworkToServerMessage::UpdateConfig(config, ret) => {
                 if let Err(error) = config.dump().await {

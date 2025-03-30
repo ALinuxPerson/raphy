@@ -462,6 +462,28 @@ impl NetworkTask {
         });
     }
 
+    fn handle_c2s_get_server_state(&self, client_id: ClientId, task_id: TaskId) {
+        let Some(s2c_tx) = self.clients.get(client_id.0).map(|c| c.s2c_tx.clone()) else {
+            tracing::warn!("client {client_id} tried to get the server state, but it doesn't exist");
+            return;
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.n2s_tx
+            .send(NetworkToServerMessage::GetServerState(tx))
+            .unwrap();
+
+        tokio::spawn(async move {
+            let config = rx.await.unwrap();
+            s2c_tx
+                .send(raphy_protocol::ServerToClientMessage::CurrentServerState(
+                    config, task_id,
+                ))
+                .ok();
+            tracing::debug!(?client_id, ?task_id, "finished responding to message");
+        });
+    }
+
     fn handle_c2s_update_config(&self, client_id: ClientId, task_id: TaskId, config: Config) {
         let (tx, rx) = oneshot::channel();
         self.n2s_tx
@@ -544,6 +566,9 @@ impl NetworkTask {
             }
             raphy_protocol::ClientToServerMessage::GetConfig(task_id) => {
                 self.handle_c2s_get_config(c2s.id, task_id)
+            }
+            raphy_protocol::ClientToServerMessage::GetServerState(task_id) => {
+                self.handle_c2s_get_server_state(c2s.id, task_id)
             }
             raphy_protocol::ClientToServerMessage::UpdateConfig(task_id, config) => {
                 self.handle_c2s_update_config(c2s.id, task_id, config)

@@ -3,9 +3,9 @@ mod error;
 mod utils;
 
 use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
 pub use config::Config;
 pub use error::SerdeError;
+use serde::{Deserialize, Serialize};
 
 pub const SERVICE_TYPE: &str = "_raphy._tcp.local.";
 pub const INSTANCE_NAME: &str = "Raphy";
@@ -71,6 +71,7 @@ impl OperationId {
 pub enum ClientToServerMessage {
     Ping(TaskId),
     GetConfig(TaskId),
+    GetServerState(TaskId),
     UpdateConfig(TaskId, Config),
     PerformOperation(TaskId, Operation),
     Input(Vec<u8>),
@@ -83,6 +84,7 @@ impl ClientToServerMessage {
     pub fn task_id(&self) -> Option<TaskId> {
         match self {
             Self::GetConfig(task_id)
+            | Self::GetServerState(task_id)
             | Self::UpdateConfig(task_id, _)
             | Self::PerformOperation(task_id, _) => Some(*task_id),
             _ => None,
@@ -100,6 +102,7 @@ pub enum ServerState {
 pub enum ServerToClientMessage {
     Pong(TaskId),
     CurrentConfig(Option<Config>, TaskId),
+    CurrentServerState(ServerState, TaskId),
     ConfigUpdated(Config, Option<TaskId>),
     OperationRequested(Operation, OperationId),
     OperationPerformed(Operation, OperationId, Option<TaskId>),
@@ -115,7 +118,9 @@ pub enum ServerToClientMessage {
 impl ServerToClientMessage {
     pub fn task_id(&self) -> Option<TaskId> {
         match self {
-            Self::Pong(task_id) | Self::CurrentConfig(_, task_id) => Some(*task_id),
+            Self::Pong(task_id)
+            | Self::CurrentConfig(_, task_id)
+            | Self::CurrentServerState(_, task_id) => Some(*task_id),
             Self::ConfigUpdated(_, task_id)
             | Self::OperationPerformed(_, _, task_id)
             | Self::OperationFailed(_, _, _, task_id)
