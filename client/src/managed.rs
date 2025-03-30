@@ -311,6 +311,7 @@ pub async fn from_tcp(addrs: impl ToSocketAddrs) -> io::Result<(ClientReader, Cl
     Ok(manage(reader, writer).await)
 }
 
+#[cfg(unix)]
 pub async fn from_unix(addr: impl AsRef<Path>) -> io::Result<(ClientReader, ClientWriter)> {
     let (reader, writer) = crate::from_unix(addr).await?;
     Ok(manage(reader, writer).await)

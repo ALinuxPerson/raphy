@@ -12,10 +12,15 @@ use std::task::{Context, Poll};
 use thiserror::Error;
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::{TcpStream, ToSocketAddrs, UnixStream, tcp, unix};
+use tokio::net::{TcpStream, ToSocketAddrs, tcp};
+
+#[cfg(unix)]
+use tokio::net::{UnixStream, unix};
 
 enum OwnedReadHalf {
     Tcp(tcp::OwnedReadHalf),
+    
+    #[cfg(unix)]
     Unix(unix::OwnedReadHalf),
 }
 
@@ -27,6 +32,8 @@ impl AsyncRead for OwnedReadHalf {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(half) => Pin::new(half).poll_read(cx, buf),
+
+            #[cfg(unix)]
             Self::Unix(half) => Pin::new(half).poll_read(cx, buf),
         }
     }
@@ -34,6 +41,8 @@ impl AsyncRead for OwnedReadHalf {
 
 enum OwnedWriteHalf {
     Tcp(tcp::OwnedWriteHalf),
+
+    #[cfg(unix)]
     Unix(unix::OwnedWriteHalf),
 }
 
@@ -45,6 +54,8 @@ impl AsyncWrite for OwnedWriteHalf {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Tcp(half) => Pin::new(half).poll_write(cx, buf),
+
+            #[cfg(unix)]
             Self::Unix(half) => Pin::new(half).poll_write(cx, buf),
         }
     }
@@ -52,6 +63,8 @@ impl AsyncWrite for OwnedWriteHalf {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(half) => Pin::new(half).poll_flush(cx),
+
+            #[cfg(unix)]
             Self::Unix(half) => Pin::new(half).poll_flush(cx),
         }
     }
@@ -59,6 +72,8 @@ impl AsyncWrite for OwnedWriteHalf {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(half) => Pin::new(half).poll_shutdown(cx),
+
+            #[cfg(unix)]
             Self::Unix(half) => Pin::new(half).poll_shutdown(cx),
         }
     }
@@ -87,9 +102,15 @@ impl ClientReader {
             .map(|(m, _)| m)
             .map_err(Into::into)
     }
-
+    
     pub fn is_unix(&self) -> bool {
-        matches!(&self.0, OwnedReadHalf::Unix(_))
+        #[cfg(unix)]
+        let ret = matches!(&self.0, OwnedReadHalf::Unix(_));
+        
+        #[cfg(not(unix))]
+        let ret = false;
+        
+        ret
     }
 
     pub fn is_tcp(&self) -> bool {
@@ -170,7 +191,13 @@ impl ClientWriter {
 
 impl ClientWriter {
     pub fn is_unix(&self) -> bool {
-        matches!(&self.0, OwnedWriteHalf::Unix(_))
+        #[cfg(unix)]
+        let ret = matches!(&self.0, OwnedWriteHalf::Unix(_));
+        
+        #[cfg(not(unix))]
+        let ret = false;
+        
+        ret
     }
 
     pub fn is_tcp(&self) -> bool {
@@ -191,6 +218,7 @@ pub async fn from_tcp(addrs: impl ToSocketAddrs) -> io::Result<(ClientReader, Cl
     ))
 }
 
+#[cfg(unix)]
 pub async fn from_unix(addr: impl AsRef<Path>) -> io::Result<(ClientReader, ClientWriter)> {
     tracing::debug!("unix stream connect");
     let stream = UnixStream::connect(addr).await?;

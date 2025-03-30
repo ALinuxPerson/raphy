@@ -36,6 +36,7 @@ where
     Ok((client_reader, client_writer))
 }
 
+#[cfg(unix)]
 pub async fn attempt_connection_via_unix(
     with_retry: bool,
 ) -> anyhow::Result<(managed::ClientReader, managed::ClientWriter)> {

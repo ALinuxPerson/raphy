@@ -1,5 +1,5 @@
 use crate::commands::{AppState, Server};
-use crate::utils::{attempt_connection, attempt_connection_via_tcp, attempt_connection_via_unix};
+use crate::utils::{attempt_connection, attempt_connection_via_tcp};
 use crate::Config;
 use anyhow::Context;
 use indexmap::IndexMap;
@@ -17,6 +17,9 @@ use tauri::{App, AppHandle, Emitter, Manager, Wry};
 use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+use crate::utils::attempt_connection_via_unix;
 
 pub fn emit_message_on_connection_failure(runtime: &Runtime, writer: ClientWriter, app: AppHandle) {
     runtime.spawn(async move {
@@ -178,6 +181,7 @@ fn real_setup(
             }
         }
         ClientMode::Local => {
+            #[cfg(unix)]
             if client.is_none() {
                 client = Some(
                     runtime
