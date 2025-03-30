@@ -6,10 +6,13 @@ use raphy_client::ClientMode;
 use raphy_protocol::config::resolved::{ConfigMask, ResolvedConfig};
 use raphy_protocol::{Config, Operation};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{App, AppHandle, Emitter, State, Wry};
+use tauri::{
+    http, App, AppHandle, Emitter, Manager, State, UriSchemeContext, UriSchemeResponder, Wry,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
@@ -95,7 +98,11 @@ pub async fn get_server_config(
 ) -> anyhow_tauri::TAResult<Option<(ResolvedConfig, ConfigMask)>> {
     tracing::debug!("lock client structure");
     let client = state.client.lock().await;
-    let client_writer = client.as_ref().context("Not connected to a server.")?.1.clone();
+    let client_writer = client
+        .as_ref()
+        .context("Not connected to a server.")?
+        .1
+        .clone();
     drop(client);
 
     tracing::debug!("get server config");
@@ -105,7 +112,7 @@ pub async fn get_server_config(
         .context("Failed to get the server config.")?
         .map(|c| c.resolve().context("Failed to resolve the server config."))
         .transpose()?;
-    
+
     tracing::debug!("server config retrieved");
 
     Ok(config)
@@ -118,9 +125,13 @@ pub async fn update_config(
     mask: ConfigMask,
 ) -> anyhow_tauri::TAResult<()> {
     let client = state.client.lock().await;
-    let client_writer = client.as_ref().context("Not connected to a server.")?.1.clone();
+    let client_writer = client
+        .as_ref()
+        .context("Not connected to a server.")?
+        .1
+        .clone();
     drop(client);
-    
+
     client_writer
         .update_config(Config::from_resolved(config, mask))
         .await
@@ -128,20 +139,28 @@ pub async fn update_config(
     Ok(())
 }
 
-async fn perform_operation(state: State<'_, AppState>, operation: Operation, op_done: &'static str) -> anyhow_tauri::TAResult<()> {
+async fn perform_operation(
+    state: State<'_, AppState>,
+    operation: Operation,
+    op_done: &'static str,
+) -> anyhow_tauri::TAResult<()> {
     tracing::debug!(?operation, ?op_done);
-    
+
     tracing::debug!("lock client structure");
     let client = state.client.lock().await;
-    let client_writer = client.as_ref().context("Not connected to a server.")?.1.clone();
+    let client_writer = client
+        .as_ref()
+        .context("Not connected to a server.")?
+        .1
+        .clone();
     drop(client);
-    
+
     tracing::debug!("client writer perform operation");
     client_writer
         .perform_operation(operation)
         .await
         .with_context(|| format!("Failed to {op_done} the server."))?;
-    Ok(())   
+    Ok(())
 }
 
 #[tauri::command]
@@ -157,4 +176,50 @@ pub async fn stop_server(state: State<'_, AppState>) -> anyhow_tauri::TAResult<(
 #[tauri::command]
 pub async fn restart_server(state: State<'_, AppState>) -> anyhow_tauri::TAResult<()> {
     perform_operation(state, Operation::Restart, "restart").await
+}
+
+async fn real_stdin(state: &AppState, input: Vec<u8>) -> anyhow::Result<()> {
+    let client = state.client.lock().await;
+    let client_writer = client
+        .as_ref()
+        .context("Not connected to a server.")?
+        .1
+        .clone();
+    drop(client);
+
+    client_writer
+        .input(input)
+        .await
+        .context("Failed to send input to the server.")?;
+    Ok(())
+}
+
+pub fn stdin(
+    ctx: UriSchemeContext<'_, Wry>,
+    request: http::Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
+    let body = request.into_body();
+
+    ctx.app_handle().state::<AppState>().runtime.spawn({
+        let app_handle = ctx.app_handle().clone();
+
+        async move {
+            let status = match real_stdin(&app_handle.state::<AppState>(), body).await {
+                Ok(()) => 200,
+                Err(error) => {
+                    tracing::error!(?error, "failed to write to stdin: {error:#}");
+                    500
+                }
+            };
+
+            responder.respond(
+                http::Response::builder()
+                    .status(status)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Cow::Borrowed(&[][..]))
+                    .unwrap(),
+            )
+        }
+    });
 }

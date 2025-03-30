@@ -1,5 +1,5 @@
 use crate::commands;
-use crate::commands::Server;
+use crate::commands::{AppState, Server};
 use anyhow::Context;
 use indexmap::IndexMap;
 use mdns_sd::ServiceEvent;

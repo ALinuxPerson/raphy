@@ -1,9 +1,12 @@
 use crate::base::ChildToServerMessage;
 use anyhow::Context;
 use raphy_protocol::{Config, ServerState};
-use std::io;
+use std::{io, mem};
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+use nix::sys::signal::Signal;
+use nix::unistd::Pid;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -22,6 +25,7 @@ enum State {
     Running {
         std: NestedSubsystem<anyhow::Error>,
         stdin_tx: UnboundedSender<Vec<u8>>,
+        pid: Option<Pid>,
     },
     Stopped,
 }
@@ -32,6 +36,7 @@ pub struct ChildTask {
     c2s_tx: UnboundedSender<ChildToServerMessage>,
     dead_tx: UnboundedSender<()>,
     dead_rx: UnboundedReceiver<()>,
+    sigterm_in_progress: bool,
     config: Option<Config>,
     sh: Option<Arc<SubsystemHandle<anyhow::Error>>>,
 }
@@ -49,6 +54,7 @@ impl ChildTask {
             c2s_tx,
             dead_tx,
             dead_rx,
+            sigterm_in_progress: false,
             config,
             sh: None,
         }
@@ -67,6 +73,14 @@ impl ChildTask {
         loop {
             tokio::select! {
                 Some(message) = self.s2c_rx.recv() => self.handle_s2c(message).await,
+                Some(()) = self.dead_rx.recv() => {
+                    self.sigterm_in_progress = false;
+                    let state = mem::replace(&mut self.state, State::Stopped);
+                    
+                    if let State::Running { std, .. } = state {
+                        std.initiate_shutdown();
+                    }
+                },
                 () = sh.on_shutdown_requested() => break,
             }
         }
@@ -135,6 +149,7 @@ impl ChildTask {
         };
         
         let child = command
+            .current_dir(config.server_jar_path.parent().unwrap_or_else(|| Path::new("/")))
             .arg("-jar")
             .arg(&config.server_jar_path)
             .args(args.iter())
@@ -211,9 +226,11 @@ impl ChildTask {
 
             Ok::<_, anyhow::Error>(())
         }));
+        
 
         let dead_tx = self.dead_tx.clone();
         let c2s_tx = self.c2s_tx.clone();
+        let pid = child.id().map(|id| Pid::from_raw(id as i32));
         self.sh()
             .start(SubsystemBuilder::new("waiter", |sh| async move {
                 match child.wait().await {
@@ -240,6 +257,7 @@ impl ChildTask {
         self.state = State::Running {
             std: root,
             stdin_tx,
+            pid,
         };
         
         self.c2s_tx.send(ChildToServerMessage::UpdateState(ServerState::Started)).ok();
@@ -248,11 +266,19 @@ impl ChildTask {
     }
 
     async fn handle_s2c_stop(&mut self) {
-        if let State::Running { std, .. } = &mut self.state {
-            std.initiate_shutdown();
+        if let State::Running { pid: Some(pid), .. } = &mut self.state {
+            let signal = if self.sigterm_in_progress {
+                Signal::SIGKILL
+            } else {
+                Signal::SIGTERM
+            };
+            
+            if let Err(error) = nix::sys::signal::kill(*pid, signal) {
+                tracing::error!(?error, ?pid, "failed to send SIGTERM to the server process");
+            }
+            
+            self.sigterm_in_progress = true;
         }
-        
-        self.state = State::Stopped;
     }
 
     async fn handle_s2c_restart(&mut self) -> anyhow::Result<()> {

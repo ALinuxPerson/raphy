@@ -12,7 +12,15 @@ pub struct ClientReader(broadcast::Receiver<ServerToClientMessage>);
 
 impl ClientReader {
     pub async fn recv(&mut self) -> Option<ServerToClientMessage> {
-        self.0.recv().await.ok()
+        loop {
+            match self.0.recv().await {
+                Ok(message) => break Some(message),
+                Err(broadcast::error::RecvError::Closed) => break None,
+                Err(broadcast::error::RecvError::Lagged(amount)) => {
+                    tracing::warn!(?amount, "client reader lagged")
+                }
+            }
+        }
     }
 
     pub async fn expect(
@@ -261,7 +269,7 @@ pub async fn manage(
 
     let cancel_token = CancellationToken::new();
 
-    let (s2c_tx, s2c_rx) = broadcast::channel(64);
+    let (s2c_tx, s2c_rx) = broadcast::channel(2048);
     tokio::spawn(client_reader_task(reader, s2c_tx, cancel_token.clone()));
 
     let client_reader = ClientReader(s2c_rx);

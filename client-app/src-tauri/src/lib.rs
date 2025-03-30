@@ -22,6 +22,7 @@ pub fn run(client_mode: ClientMode) -> tauri::Result<()> {
             commands::stop_server,
             commands::restart_server,
         ])
+        .register_asynchronous_uri_scheme_protocol("stdin", commands::stdin)
         .manage(client_mode)
         .setup(setup(client_mode))
         .run(tauri::generate_context!())
