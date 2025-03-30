@@ -28,6 +28,10 @@ export const connectToServerByAddress = async (ip: string, port: number): Promis
     });
 };
 
+export const clientConnectionActive = async (): Promise<boolean> => {
+    return await invoke('client_connection_active') as boolean;
+}
+
 // Enum for client mode to match Rust's ClientMode enum
 export enum ClientMode {
   Local = 'Local',

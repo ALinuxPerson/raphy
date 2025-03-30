@@ -7,6 +7,12 @@ edition = "2024"
 console-subscriber = { version = "0.4.1", optional = true }
 tracing-subscriber = { version = "0.3.19", optional = true }
 tracing = { version = "0.1.41", optional = true }
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+serde_json = { version = "1.0.140", optional = true }
+fs-err = { version = "3.1.0", features = ["tokio"], optional = true }
+anyhow = { version = "1.0.97", optional = true }
+directories = { version = "6.0.0", optional = true }
 
 [features]
 init_logging = ["dep:tracing-subscriber", "dep:console-subscriber", "dep:tracing"]
+config = ["dep:serde", "dep:serde_json", "dep:fs-err", "dep:anyhow", "dep:directories", "dep:tracing"]

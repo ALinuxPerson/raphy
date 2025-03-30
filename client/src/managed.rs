@@ -95,7 +95,6 @@ impl ClientWriter {
     }
 
     pub async fn perform_operation(&self, operation: Operation) -> anyhow::Result<()> {
-        tracing::info!("managed perform operation");
         let (tx, rx) = oneshot::channel();
         self.0
             .send(ClientToServerMessage::PerformOperation(operation, tx))

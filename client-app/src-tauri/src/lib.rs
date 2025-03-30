@@ -1,20 +1,21 @@
 mod commands;
 mod setup;
+mod config;
+pub mod utils;
 
-use raphy_client::ClientMode;
+pub use config::Config;
+
+use raphy_client::{managed, ClientMode};
 use setup::setup;
 use std::env;
-use std::process::ExitCode;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer};
+use tokio::runtime::Runtime;
 
-pub fn run(client_mode: ClientMode) -> tauri::Result<()> {
+pub fn run(client_mode: ClientMode, data: Option<(managed::ClientReader, managed::ClientWriter, Runtime)>) -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::connect_to_server,
+            commands::client_connection_active,
             commands::client_mode,
             commands::get_server_config,
             commands::update_config,
@@ -25,16 +26,6 @@ pub fn run(client_mode: ClientMode) -> tauri::Result<()> {
         ])
         .register_asynchronous_uri_scheme_protocol("stdin", commands::stdin)
         .manage(client_mode)
-        .setup(setup(client_mode))
+        .setup(setup(client_mode, data))
         .run(tauri::generate_context!())
-}
-
-pub fn main(client_mode: ClientMode) -> ExitCode {
-    raphy_common::init_logging("RAPHY_CLIENT_APP_TOKIO_CONSOLE_ENABLED");
-
-    if let Err(_error) = run(client_mode) {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
 }

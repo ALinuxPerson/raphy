@@ -65,13 +65,11 @@ pub mod resolved {
 use crate::utils;
 use anyhow::Context;
 use bincode::{Decode, Encode};
-use directories::ProjectDirs;
-use fs_err::tokio as fs;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::env;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use raphy_common::ConfigLike;
 
 #[derive(Serialize, Deserialize, Copy, Clone)]
 pub enum JavaPathKind {
@@ -186,48 +184,7 @@ pub struct Config {
     pub user: User,
 }
 
-impl Config {
-    pub fn path() -> anyhow::Result<PathBuf> {
-        match env::var_os("RAPHY_CONFIG_PATH") {
-            Some(path) => Ok(PathBuf::from(path)),
-            None => match ProjectDirs::from("", "ALinuxPerson", "raphy") {
-                Some(pd) => Ok(pd.config_dir().join("config.json")),
-                None => Ok(env::current_dir()
-                    .context("Failed to get the current directory.")?
-                    .join("config.json")),
-            },
-        }
-    }
-
-    pub async fn load() -> anyhow::Result<Option<Self>> {
-        let path = Self::path().context("Failed to get the config path.")?;
-
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let contents = fs::read_to_string(path)
-            .await
-            .context("Failed to read the config file.")?;
-        Ok(Some(
-            serde_json::from_str(&contents).context("Failed to parse the config file.")?,
-        ))
-    }
-
-    pub async fn dump(&self) -> anyhow::Result<()> {
-        let path = Self::path().context("Failed to get the config path.")?;
-
-        if let Some(path) = path.parent() {
-            if let Err(error) = fs::create_dir_all(path).await {
-                tracing::error!("failed to create the config directory: {error}");
-            }
-        }
-
-        let contents = serde_json::to_string(self).context("Failed to serialize the config.")?;
-        fs::write(path, contents)
-            .await
-            .context("Failed to write the config file.")?;
-
-        Ok(())
-    }
+impl ConfigLike for Config {
+    const ENV_VAR: &'static str = "RAPHY_CONFIG_PATH";
+    const CONFIG_PATH_NAME: &'static str = "config.json";
 }

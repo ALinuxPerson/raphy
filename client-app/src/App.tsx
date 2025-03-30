@@ -2,7 +2,7 @@ import "./style.css";
 import SetupPage from "./pages/SetupPage.tsx";
 import { useState, useEffect } from "react";
 import MainPage from "./pages/MainPage.tsx";
-import { ClientMode } from "./utils/server.ts";
+import {clientConnectionActive, ClientMode} from "./utils/server.ts";
 import { clientModeStore } from "./utils/clientModeStore.ts";
 import { ConnectionProvider } from "./contexts/ConnectionContext.tsx";
 import ConnectionFailureOverlay from "./components/ConnectionFailureOverlay.tsx";
@@ -13,18 +13,23 @@ function App() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        clientModeStore.getMode().then(clientMode => {
-            setMode(clientMode);
+        const init = async () => {
+            clientModeStore.getMode().then(clientMode => {
+                setMode(clientMode);
 
-            // Set the initial page based on client mode
-            if (clientMode === ClientMode.Local) {
-                setCurrentPage("main");
-            } else if (clientMode === ClientMode.Remote) {
-                setCurrentPage("setup");
-            }
+                clientConnectionActive().then(isActive => {
+                    if (isActive) {
+                        setCurrentPage("main");
+                    } else {
+                        setCurrentPage("setup");
+                    }
+                })
 
-            setLoading(false);
-        });
+                setLoading(false);
+            });
+        }
+
+        init();
     }, []);
 
     const navigateToMainPage = () => { setCurrentPage("main"); };

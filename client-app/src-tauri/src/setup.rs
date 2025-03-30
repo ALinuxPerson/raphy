@@ -1,16 +1,20 @@
-use crate::commands;
 use crate::commands::{AppState, Server};
+use crate::utils::{attempt_connection, attempt_connection_via_tcp, attempt_connection_via_unix};
+use crate::Config;
 use anyhow::Context;
 use indexmap::IndexMap;
 use mdns_sd::ServiceEvent;
 use native_dialog::MessageType;
 use raphy_client::managed::{ClientReader, ClientWriter};
-use raphy_client::ClientMode;
+use raphy_client::{managed, ClientMode};
+use raphy_common::ConfigLike;
 use raphy_protocol::{ServerToClientMessage, UNIX_SOCKET_PATH};
+use std::cell::Cell;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{App, AppHandle, Emitter, Manager, Wry};
+use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
@@ -18,9 +22,10 @@ pub fn emit_message_on_connection_failure(runtime: &Runtime, writer: ClientWrite
     runtime.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         interval.tick().await;
-        
+
         loop {
-            let did_fail = match tokio::time::timeout(Duration::from_secs(30), writer.ping()).await {
+            let did_fail = match tokio::time::timeout(Duration::from_secs(30), writer.ping()).await
+            {
                 Ok(Ok(())) => false,
                 Ok(Err(error)) => {
                     tracing::error!(?error, "failed to send ping message: {error:#}");
@@ -31,13 +36,13 @@ pub fn emit_message_on_connection_failure(runtime: &Runtime, writer: ClientWrite
                     true
                 }
             };
-            
+
             if did_fail {
                 app.emit("connection-failure", ()).unwrap();
                 break;
             } else {
                 interval.tick().await;
-                continue
+                continue;
             }
         }
     });
@@ -57,13 +62,27 @@ pub fn emit_message_on_s2c(runtime: &Runtime, mut reader: ClientReader, app: App
                     };
                     app.emit("config-updated", config).unwrap();
                 }
-                ServerToClientMessage::OperationRequested(op, id) => app.emit("operation-requested", (op, id)).unwrap(),
-                ServerToClientMessage::OperationPerformed(op, id, _) => app.emit("operation-performed", (op, id)).unwrap(),
-                ServerToClientMessage::OperationFailed(op, id, error, _) => app.emit("operation-failed", (op, id, error.to_string())).unwrap(),
-                ServerToClientMessage::ServerStateUpdated(state) => app.emit("server-state-updated", state).unwrap(),
-                ServerToClientMessage::Stdout(buf) => app.emit("stdout", String::from_utf8_lossy(&buf)).unwrap(),
-                ServerToClientMessage::Stderr(buf) => app.emit("stderr", String::from_utf8_lossy(&buf)).unwrap(),
-                ServerToClientMessage::FatalError(error) => app.emit("fatal-error", error.to_string()).unwrap(),
+                ServerToClientMessage::OperationRequested(op, id) => {
+                    app.emit("operation-requested", (op, id)).unwrap()
+                }
+                ServerToClientMessage::OperationPerformed(op, id, _) => {
+                    app.emit("operation-performed", (op, id)).unwrap()
+                }
+                ServerToClientMessage::OperationFailed(op, id, error, _) => app
+                    .emit("operation-failed", (op, id, error.to_string()))
+                    .unwrap(),
+                ServerToClientMessage::ServerStateUpdated(state) => {
+                    app.emit("server-state-updated", state).unwrap()
+                }
+                ServerToClientMessage::Stdout(buf) => {
+                    app.emit("stdout", String::from_utf8_lossy(&buf)).unwrap()
+                }
+                ServerToClientMessage::Stderr(buf) => {
+                    app.emit("stderr", String::from_utf8_lossy(&buf)).unwrap()
+                }
+                ServerToClientMessage::FatalError(error) => {
+                    app.emit("fatal-error", error.to_string()).unwrap()
+                }
                 ServerToClientMessage::Error(error, _) => app.emit("error", error).unwrap(),
                 ServerToClientMessage::ShuttingDown => app.emit("shutting-down", ()).unwrap(),
                 _ => continue,
@@ -123,20 +142,49 @@ fn browse_for_raphy_servers(
     Ok(())
 }
 
-fn real_setup(app: &mut App<Wry>, client_mode: ClientMode) -> anyhow::Result<()> {
+fn real_setup(
+    app: &mut App<Wry>,
+    client_mode: ClientMode,
+    data: Option<(ClientReader, ClientWriter, Runtime)>,
+) -> anyhow::Result<()> {
     let servers = Arc::new(Mutex::new(IndexMap::new()));
-    let runtime = Runtime::new().context("Failed to build the Tokio runtime.")?;
+    let (runtime, mut client) = match data {
+        Some((cr, cw, runtime)) => (runtime, Some((cr, cw))),
+        None => {
+            let runtime = Runtime::new().context("Failed to build the Tokio runtime.")?;
+            (runtime, None)
+        }
+    };
+    let config = runtime
+        .block_on(Config::load())
+        .map(|c| c.unwrap_or_default())
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, "failed to load the config: {error:#}");
+            Config::default()
+        });
 
-    let client = match client_mode {
+    match client_mode {
         ClientMode::Remote => {
-            browse_for_raphy_servers(app, Arc::clone(&servers), &runtime)?;
-            None
+            if let Some(socket_addr) = &config.last_remote_client {
+                match runtime.block_on(attempt_connection_via_tcp(socket_addr.as_slice(), false)) {
+                    Ok(value) => client = Some(value),
+                    Err(error) => {
+                        tracing::warn!(?error, "failed to connect to the last remote server");
+                        browse_for_raphy_servers(app, Arc::clone(&servers), &runtime)?;
+                    }
+                }
+            } else {
+                browse_for_raphy_servers(app, Arc::clone(&servers), &runtime)?;
+            }
         }
         ClientMode::Local => {
-            let client = runtime
-                .block_on(raphy_client::managed::from_unix(UNIX_SOCKET_PATH))
-                .context("Failed to connect to the server.")?;
-            Some(client)
+            if client.is_none() {
+                client = Some(
+                    runtime
+                        .block_on(attempt_connection_via_unix(false))
+                        .context("Failed to connect to the server.")?,
+                );
+            }
         }
     };
 
@@ -145,18 +193,23 @@ fn real_setup(app: &mut App<Wry>, client_mode: ClientMode) -> anyhow::Result<()>
         emit_message_on_connection_failure(&runtime, writer.clone(), app.handle().clone())
     }
 
-    app.manage(commands::AppState {
+    app.manage(AppState {
         servers,
         client: Mutex::new(client),
         runtime,
+        config: Mutex::new(config),
     });
 
     Ok(())
 }
 
-pub fn setup(client_mode: ClientMode) -> impl Fn(&mut App<Wry>) -> Result<(), Box<dyn Error>> {
+pub fn setup(
+    client_mode: ClientMode,
+    data: Option<(ClientReader, ClientWriter, Runtime)>,
+) -> impl Fn(&mut App<Wry>) -> Result<(), Box<dyn Error>> {
+    let data = Cell::new(data);
     move |app| {
-        let result = real_setup(app, client_mode);
+        let result = real_setup(app, client_mode, data.take());
 
         // the reason why we handle errors here is because `tauri` panics when the setup hook fails, so
         // if we handled it in the main function, this dialog would never be shown.

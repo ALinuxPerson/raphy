@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle, Toplevel};
 use tracing_subscriber::{EnvFilter, Layer};
+use raphy_common::ConfigLike;
 
 async fn real_main(sh: SubsystemHandle<anyhow::Error>) -> anyhow::Result<()> {
     let (n2s_tx, n2s_rx) = mpsc::unbounded_channel();

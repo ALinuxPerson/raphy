@@ -6,13 +6,10 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.97"
 bincode = "2.0.1"
-console-subscriber = "0.4.1"
-fs-err = { version = "3.1.0", features = ["tokio"] }
-hostname = "0.4.0"
 mdns-sd = "0.13.3"
 native-dialog = "0.7.0"
 nix = { version = "0.29.0", features = ["process", "signal"] }
-raphy-common = { version = "0.1.0", path = "../common", features = ["init_logging"] }
+raphy-common = { version = "0.1.0", path = "../common", features = ["init_logging", "config"] }
 raphy-protocol = { version = "0.1.0", path = "../protocol" }
 slab = "0.4.9"
 tokio = { version = "1.44.0", features = ["rt-multi-thread", "macros", "net", "io-util", "process"] }

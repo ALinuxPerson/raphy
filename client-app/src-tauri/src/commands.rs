@@ -15,11 +15,13 @@ use tauri::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+use raphy_common::ConfigLike;
 
 pub struct AppState {
     pub servers: Arc<Mutex<IndexMap<String, Server>>>,
     pub client: Mutex<Option<(ClientReader, ClientWriter)>>,
     pub runtime: Runtime,
+    pub config: Mutex<crate::Config>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,8 +85,28 @@ pub async fn connect_to_server(
     setup::emit_message_on_connection_failure(&state.runtime, client_writer, app_handle);
 
     tracing::info!("connected to server");
-
+   
+    let mut config = state.config.lock().await;
+    config.last_remote_client = Some(socket_addresses);
+    
+    if let Err(error) = config.dump().await {
+        tracing::warn!(?error, "failed to save the config: {error:#}");
+    }
+    
+    drop(config);
+   
     Ok(())
+}
+
+#[tauri::command]
+pub async fn client_connection_active(
+    state: State<'_, AppState>,
+) -> anyhow_tauri::TAResult<bool> {
+    tracing::debug!("lock client structure");
+    let client = state.client.lock().await;
+    let is_connected = client.is_some();
+    tracing::debug!(?is_connected, "client connection active");
+    Ok(is_connected)
 }
 
 #[tauri::command]

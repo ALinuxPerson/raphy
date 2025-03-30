@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio_graceful_shutdown::SubsystemHandle;
+use raphy_common::ConfigLike;
 
 pub enum NetworkToServerMessage {
     GetConfig(oneshot::Sender<Option<Config>>),
