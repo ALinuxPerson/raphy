@@ -38,7 +38,7 @@ function App() {
             <div>
                 {currentPage === "setup"
                     ? <SetupPage navigateToMainPage={navigateToMainPage} />
-                    : <MainPage clientMode={mode} />}
+                    : <MainPage clientMode={mode!} />}
             </div>
             <ConnectionFailureOverlay />
         </ConnectionProvider>

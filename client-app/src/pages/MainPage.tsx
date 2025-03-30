@@ -85,7 +85,11 @@ const showNotification = (title: string, message: string, type: 'info' | 'warnin
     }, 5000);
 };
 
-const MainPage = (clientMode: ClientMode) => {
+interface MainPageProps {
+    clientMode: ClientMode;
+}
+
+const MainPage = ({ clientMode }: MainPageProps) => {
     const [showConsole, setShowConsole] = useState(false);
     const [operationInProgress, setOperationInProgress] = useState<Operation | null>(null);
     const [serverStateKind, setServerStateKind] = useState<ServerStateKind>("Stopped");

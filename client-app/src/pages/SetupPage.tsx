@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { connectToServer, connectToServerByAddress, Server } from "../utils/server";
 import ServerList from "../components/setup/ServerList.tsx";
-import ConnectionStatus from "../components/setup/ConnectionStatus.tsx";
+import ConnectionStatus, {ConnectionStatusType} from "../components/setup/ConnectionStatus.tsx";
 import NavigationButtons from "../components/setup/NavigationButtons.tsx";
 
 interface SetupPageProps {
@@ -12,7 +12,7 @@ interface SetupPageProps {
 const SetupPage = ({ navigateToMainPage }: SetupPageProps) => {
     const [servers, setServers] = useState<Record<string, Server>>({});
     const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
-    const [connectionStatus, setConnectionStatus] = useState("idle");
+    const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusType>("idle");
     const [isManualEntry, setIsManualEntry] = useState(false);
     const [manualServer, setManualServer] = useState<{
         hostname: string;
@@ -167,7 +167,7 @@ const SetupPage = ({ navigateToMainPage }: SetupPageProps) => {
                 <ServerList
                     servers={serversArray}
                     selectedServer={selectedServer}
-                    onSelectServer={(server) => setSelectedServerId(server.id)}
+                    onSelectServer={(server) => setSelectedServerId(server.id || null)}
                     disabled={connectionStatus === 'connecting' || connectionStatus === 'connected'}
                 />
             )}

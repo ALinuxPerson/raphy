@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-type ConnectionStatusType = 'idle' | 'connecting' | 'connected' | 'failed';
+export type ConnectionStatusType = 'idle' | 'connecting' | 'connected' | 'failed';
 
 interface ConnectionStatusProps {
     status: ConnectionStatusType;
