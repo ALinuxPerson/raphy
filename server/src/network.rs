@@ -1,6 +1,6 @@
 use crate::base::NetworkToServerMessage;
 use anyhow::{Context, anyhow};
-use raphy_protocol::{Config, Operation, OperationId, SerdeError, TaskId, UNIX_SOCKET_PATH};
+use raphy_protocol::{Config, Operation, OperationId, SerdeError, TaskId, DEFAULT_PORT, UNIX_SOCKET_PATH};
 use slab::Slab;
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -644,13 +644,13 @@ async fn tcp(
                         stream
                     },
                     Err(error) => {
-                        tracing::error!("failed to accept incoming connection from TCP listener: {error}");
+                        tracing::error!("failed to accept incoming connection from tcp listener: {error}");
                         continue;
                     }
                 };
 
                 new_clients.send(NewClient::Tcp(stream))
-                    .expect("failed to send new TCP client to network task");
+                    .expect("failed to send new tcp client to network task");
             }
             () = sh.on_shutdown_requested() => break,
         }
@@ -664,7 +664,10 @@ pub async fn initialize(
     n2s_tx: UnboundedSender<NetworkToServerMessage>,
     global_s2c_rx: UnboundedReceiver<raphy_protocol::ServerToClientMessage>,
 ) -> anyhow::Result<u16> {
-    let address = env::var("RAPHY_SERVER_ADDRESS").unwrap_or_else(|_| "0.0.0.0:0".to_owned());
+    let address = env::var("RAPHY_SERVER_ADDRESS").unwrap_or_else(|_| {
+        let port = env::args().nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(DEFAULT_PORT);
+        format!("0.0.0.0:{port}")
+    });
     let (new_clients_tx, new_clients_rx) = mpsc::unbounded_channel();
 
     sh.start(SubsystemBuilder::new("unix-listener", {

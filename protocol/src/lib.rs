@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const SERVICE_TYPE: &str = "_raphy._tcp.local.";
 pub const INSTANCE_NAME: &str = "Raphy";
 pub const UNIX_SOCKET_PATH: &str = "/tmp/raphy.sock";
+pub const DEFAULT_PORT: u16 = 18000;
 
 #[derive(Encode, Decode, Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Operation {
