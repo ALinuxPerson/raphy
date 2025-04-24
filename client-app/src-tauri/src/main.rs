@@ -1,3 +1,8 @@
+#![cfg_attr(
+  all(not(debug_assertions), target_os = "windows"),
+  windows_subsystem = "windows"
+)]
+
 #[cfg(unix)]
 mod client_mode {
     use std::{env, iter};
@@ -138,7 +143,7 @@ fn main() -> ExitCode {
     
     if let Err(error) = raphy_client_app_lib::run(client_mode, data) {
         tracing::error!(?error, "failed to run the client app: {error}");
-        ExitCode::FAILURE
+f        ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }

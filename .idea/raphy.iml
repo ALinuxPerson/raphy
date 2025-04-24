@@ -9,6 +9,7 @@
       <sourceFolder url="file://$MODULE_DIR$/client/src-tauri/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/client/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/common/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/client-app-slint-experimental/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

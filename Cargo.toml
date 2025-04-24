@@ -1,4 +1,10 @@
 [workspace]
-members = ["server", "client-app/src-tauri", "protocol", "client", "common"]
+members = [
+    "client",
+    "client-app/src-tauri",
+    "common",
+    "protocol",
+    "server",
+    "client-app-slint-experimental",
+]
 resolver = "2"
-
