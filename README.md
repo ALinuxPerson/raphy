@@ -66,3 +66,53 @@ The system consists of a client application, a daemon process, and the target se
     *   Server started.
     *   Server stopped.
     *   Server crashed.
+## Building the Project
+
+This section outlines the steps to build the Raphy server and client applications.
+
+### Prerequisites
+
+*   **Rust:** Ensure you have a recent version of Rust installed. You can get it from [rust-lang.org](https://www.rust-lang.org/tools/install).
+*   **Node.js and pnpm:** For building the Tauri client application.
+    *   Install Node.js (which includes npm) from [nodejs.org](https://nodejs.org/).
+    *   Install pnpm globally: `npm install -g pnpm`
+*   **Tauri CLI:** Install the Tauri CLI tools: `cargo install tauri-cli --version "^1.0"` (or the version specified in `client-app/src-tauri/Cargo.toml`).
+*   **System Dependencies for Tauri:** Follow the Tauri guide for your specific OS to install necessary dependencies (e.g., webview development libraries): [Tauri Prerequisites](https://tauri.app/v1/guides/getting-started/prerequisites).
+
+### Building the Server Daemon
+
+1.  Navigate to the server directory:
+    ```bash
+    cd server
+    ```
+2.  Build the server:
+    ```bash
+    cargo build --release
+    ```
+    The executable will be located in `server/target/release/`.
+
+### Building the Client Application (Tauri)
+
+1.  Navigate to the client application directory:
+    ```bash
+    cd client-app
+    ```
+2.  Install Node.js dependencies:
+    ```bash
+    pnpm install
+    ```
+3.  Build the Tauri application:
+    ```bash
+    pnpm tauri build
+    ```
+    The application bundle will be located in `client-app/src-tauri/target/release/bundle/`. The exact path and format (e.g., `.app`, `.dmg`, `.msi`, `.AppImage`) will depend on your operating system.
+
+### Building Common Components
+
+The `common` and `protocol` crates are dependencies of the server and client. They will be built automatically when you build the server or client. If you need to build them independently for testing or development:
+
+1.  Navigate to the respective directory (e.g., `cd common`).
+2.  Build the crate:
+    ```bash
+    cargo build
+    ```
