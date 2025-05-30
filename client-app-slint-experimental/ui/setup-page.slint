@@ -1,0 +1,136 @@
+import { Button, VerticalBox, LineEdit, StandardTableView } from "std-widgets.slint";
+
+export enum SelectionMode { AutomaticDiscovery, ManualEntry }
+
+component Header inherits VerticalLayout {
+    padding-bottom: 16px;
+    spacing: 8px;
+
+    Text {
+        text: "Raphy";
+        font-size: 30px;
+        font-weight: 700;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: "Setup Process";
+        font-size: 20px;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: "To begin, please select the appropriate server from the list below.";
+        horizontal-alignment: center;
+    }
+}
+
+component SelectionModeToggle inherits HorizontalLayout {
+    in-out property <SelectionMode> selection-mode: SelectionMode.AutomaticDiscovery;
+    alignment: center;
+    spacing: 8px;
+
+    ad-button := Button {
+        text: "Automatic Discovery";
+        enabled: selection-mode != SelectionMode.AutomaticDiscovery;
+        clicked => {
+            selection-mode = SelectionMode.AutomaticDiscovery;
+        }
+    }
+    me-button := Button {
+        text: "Manual Entry";
+        enabled: selection-mode != SelectionMode.ManualEntry;
+        clicked => {
+            selection-mode = SelectionMode.ManualEntry;
+        }
+    }
+}
+
+component AutomaticServerSelection inherits VerticalLayout {
+    in property <[[StandardListViewItem]]> row-data;
+    callback current-row-changed(int);
+
+    if (row-data.length != 0): stv := StandardTableView {
+        columns: [
+            { title: "Hostname" },
+            { title: "IP Address" },
+            { title: "Port" }
+        ];
+        rows: row-data;
+        current-row-changed(row) => {
+            current-row-changed(row);
+        }
+    }
+    if (row-data.length == 0): Text {
+        text: "No servers detected";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-weight: 500;
+        color: grey;
+    }
+}
+
+component ManualServerSelection inherits VerticalLayout {
+    alignment: start;
+    spacing: 16px;
+
+    in-out property <string> ip-address;
+    in-out property <int> port;
+
+    Text {
+        text: "IP Address";
+        font-size: 14px;
+        font-weight: 500;
+    }
+    LineEdit {
+        placeholder-text: "192.168.1.100";
+        edited(text) => {
+            ip-address = text;
+        }
+    }
+
+    Text {
+        text: "Port";
+        font-size: 14px;
+        font-weight: 500;
+    }
+    LineEdit {
+        placeholder-text: "18000";
+        input-type: number;
+        edited(text) => {
+            port = text.to-float();
+        }
+    }
+}
+
+export enum ConnectionStatus { Idle, Connecting, Connected, Failed }
+
+export component ConnectionStatusView inherits Rectangle {
+    in-out property <ConnectionStatus> connection-status: Connected;
+    background: red;
+
+    HorizontalLayout {
+        if (connection-status == ConnectionStatus.Connecting): Text { text: "Connecting to server..."; }
+        if (connection-status == ConnectionStatus.Connected): Text { text: "Connected to server."; }
+        if (connection-status == ConnectionStatus.Failed): Text { text: "Failed to connect to server."; }
+    }
+}
+
+export component SetupPage inherits VerticalLayout {
+    padding: 24px;
+    spacing: 8px;
+    alignment: start;
+
+    Header {}
+
+    sm-toggle := SelectionModeToggle {}
+
+    // Server Selection
+    VerticalLayout {
+        Rectangle {
+            color: lightgray;
+            if (sm-toggle.selection-mode == SelectionMode.AutomaticDiscovery): AutomaticServerSelection {}
+            if (sm-toggle.selection-mode == SelectionMode.ManualEntry): ManualServerSelection {}
+        }
+    }
+
+    cs-view := ConnectionStatusView {}
+}

@@ -12,6 +12,7 @@ mod client_mode {
     use raphy_client::{managed, ClientMode};
     use raphy_client_app_lib::utils::attempt_connection_via_unix;
     use std::os::unix::process::CommandExt;
+    use anyhow::Context;
 
     fn find_raphy_server_bin_path() -> Option<PathBuf> {
         env::var_os("RAPHY_CLIENT_APP_SERVER_BIN_PATH")
@@ -143,7 +144,7 @@ fn main() -> ExitCode {
     
     if let Err(error) = raphy_client_app_lib::run(client_mode, data) {
         tracing::error!(?error, "failed to run the client app: {error}");
-f        ExitCode::FAILURE
+        ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }

@@ -28,10 +28,6 @@ export const connectToServerByAddress = async (ip: string, port: number): Promis
     });
 };
 
-export const clientConnectionActive = async (): Promise<boolean> => {
-    return await invoke('client_connection_active') as boolean;
-}
-
 // Enum for client mode to match Rust's ClientMode enum
 export enum ClientMode {
   Local = 'Local',
@@ -48,7 +44,7 @@ export enum JavaPathKind {
     Custom = 'Custom'
 }
 
-export enum ArgumentsKind {
+export enum ServerArgumentsKind {
     Parsed = 'Parsed',
     Manual = 'Manual'
 }
@@ -58,35 +54,35 @@ export enum UserKind {
     Specific = 'Specific'
 }
 
-export interface ParsedArguments {
+export interface ParsedServerArguments {
     Parsed: string;
 }
 
-export function isParsedArguments(args: Arguments): args is ParsedArguments {
-    return (args as ParsedArguments).Parsed !== undefined;
+export function isParsedServerArguments(args: ServerArguments): args is ParsedServerArguments {
+    return (args as ParsedServerArguments).Parsed !== undefined;
 }
 
-export interface ManualArguments {
+export interface ManualServerArguments {
     Manual: string[];
 }
 
-export function isManualArguments(args: Arguments): args is ManualArguments {
-    return (args as ManualArguments).Manual !== undefined;
+export function isManualServerArguments(args: ServerArguments): args is ManualServerArguments {
+    return (args as ManualServerArguments).Manual !== undefined;
 }
 
-export type Arguments = ParsedArguments | ManualArguments;
+export type ServerArguments = ParsedServerArguments | ManualServerArguments;
 
+// TypeScript equivalents to Rust structs
 export interface ResolvedConfig {
     java_path: string;
     server_jar_path: string;
-    java_arguments: Arguments;
-    server_arguments: Arguments;
+    arguments: ServerArguments;
     user: string | null;
 }
 
 export interface ConfigMask {
     java_path: JavaPathKind;
-    arguments: ArgumentsKind;
+    arguments: ServerArgumentsKind;
     user: UserKind;
 }
 

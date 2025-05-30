@@ -1,0 +1,23 @@
+import { Button, VerticalBox } from "std-widgets.slint";
+import { SetupPage } from "./setup-page.slint";
+
+export enum Page { Setup, Main }
+
+component MainPage {
+
+}
+
+export component App inherits Window {
+    in property <Page> current-page;
+
+    default-font-size: 14px;
+    default-font-family: "Comic Sans MS";
+    preferred-width: 750px;
+    preferred-height: 600px;
+    min-width: self.preferred-width;
+    min-height: self.preferred-height;
+    title: "Raphy Client";
+
+    if (current-page == Page.Setup): SetupPage {}
+    if (current-page == Page.Main): MainPage {}
+}
