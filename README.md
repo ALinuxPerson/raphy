@@ -1,39 +1,10 @@
-# Client
-* Windows/Intel Mac (specifically 2017 iMac) only
-* Allow selection of alternate server via menu bar
-* Different modes: local, remote
-  * Local: unix socket, starts server process automatically
-  * Remote: TCP, connects to server process with onboarding:
-    * Detect server and its info on local network via DNS-SD
-    * Save server info
+# Raphy: Remote Server Management Utility
 
-# Server
-* Intel Mac only (specifically 2017 iMac)
-* TCP used
-* Broadcasts service over DNS-SD
-* stdin, stdout, and stderr are attached to the server process
-* Login item created
-* Configuration saved:
-  * Java path
-  * Server path
-  * Server arguments
-  * User to run server as
+Raphy is a client-server application designed for managing and interacting with a server process, typically a Java application, across different modes of operation.
 
-# Common
-* Both share the same GUIs
-* Specify:
-    * Java path (auto-detected if possible)
-    * Path to server jar
-    * Arguments passed to server (`Vec<String>`), parse modes:
-        * Automatic, parse like POSIX shell
-        * Manual, specify each string manually
-    * User to run server as
-* Console display: stdout and stderr, with stdin input
-* Ability to start/stop server
-* Send notification when:
-    * Server starts
-    * Server stops
-    * Server crashes
+## Architecture Overview
+
+The system consists of a client application, a daemon process, and the target server process. Communication can occur locally via Unix sockets or remotely via TCP/IP.
 
 ```
 ┌───────────────┐     Local        ┌──────────────┐      ┌────────────────┐
@@ -49,3 +20,49 @@
 │ (Remote)      │                 │ (Other host) │
 └───────────────┘                 └──────────────┘
 ```
+
+## Client
+
+*   **Platform Support:** Windows and Intel-based Macs (tested on 2017 iMac).
+*   **Server Selection:** Allows choosing an alternate server through the menu bar.
+*   **Operating Modes:**
+    *   **Local Mode:**
+        *   Communicates with the server daemon via a Unix socket.
+        *   Automatically starts the server daemon process.
+    *   **Remote Mode:**
+        *   Communicates with the server daemon via TCP.
+        *   Facilitates onboarding for connecting to a server process:
+            *   Detects server and its information on the local network using DNS-SD.
+            *   Saves server connection information.
+
+## Server Daemon
+
+*   **Platform Support:** Intel-based Macs (tested on 2017 iMac).
+*   **Communication Protocol:** Uses TCP for network communication.
+*   **Service Discovery:** Broadcasts its service on the local network via DNS-SD.
+*   **Process I/O:** Standard input (stdin), standard output (stdout), and standard error (stderr) of the target server process are attached to the daemon.
+*   **Startup:** Configured as a login item for automatic startup.
+*   **Persistent Configuration:** Saves the following settings:
+    *   Java executable path.
+    *   Path to the server application (e.g., JAR file).
+    *   Arguments for the server application.
+    *   User account under which the server process will run.
+
+## Common Components & Features
+
+*   **Shared GUI:** Both client and server configuration interfaces share common GUI elements.
+*   **Configuration Options:**
+    *   **Java Path:** Path to the Java executable (auto-detection attempted).
+    *   **Server Path:** Path to the server application (e.g., JAR file).
+    *   **Server Arguments:** Arguments passed to the server process (`Vec<String>`).
+        *   **Automatic Parsing:** Parses arguments similar to a POSIX shell.
+        *   **Manual Specification:** Allows each argument string to be specified individually.
+    *   **Run-As User:** Specifies the user account for running the server process.
+*   **Console Interface:**
+    *   Displays stdout and stderr from the server process.
+    *   Provides an input field for stdin to the server process.
+*   **Server Control:** Ability to start and stop the server process.
+*   **Notifications:** Sends system notifications for the following events:
+    *   Server started.
+    *   Server stopped.
+    *   Server crashed.
